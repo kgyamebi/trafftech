@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { mapProviderId } from "@/config/maps";
+import { localPlaceHits, mergePlaceHits, routeHoldFrom, type MapMark } from "@/domain/catalogue";
 import { DriverIntelligenceEngine, type TripIntelligence } from "@/domain/intelligence";
 import { demoCapabilities, openCapabilities, unsupportedNotes } from "@/domain/providers";
 import {
@@ -28,9 +29,11 @@ import {
   makeEvent,
   mapFailureMessage,
   movementStatus,
+  followingInstruction,
   nextInstruction,
   prefersNight,
   progressAlong,
+  splitRoute,
   rememberPlace,
   rerouteDecision,
   steadyPosition,
@@ -52,12 +55,39 @@ import {
 } from "@/domain/navigation";
 import { gpsSpeedReading, medianSpeed, parkedReading } from "@/domain/gps-speed";
 import { chooseRoadLimit, rememberRoadLimit } from "@/domain/road-limit";
+import { pendingTripFrom, type PendingTrip } from "@/domain/pending-trip";
 import { speedCompliance } from "@/domain/score";
 import { mergeDriveCookie } from "@/domain/drive-prefs";
 import type { PlaceView, Workspace } from "@/domain/types";
 import { speak } from "../speak";
 import { deletePlaceAction, deleteSessionAction, savePlaceAction, saveSessionAction } from "@/server/actions";
 import { createOpenMapProvider, createOpenServices, reverseLabel } from "./map-client";
+
+const PENDING_TRIP = "nokware-pending-trip";
+
+function holdTrip(trip: PendingTrip) {
+  try {
+    localStorage.setItem(PENDING_TRIP, JSON.stringify(trip));
+  } catch {
+    /* the summary on screen is the other copy */
+  }
+}
+
+function heldTrip(): PendingTrip | null {
+  try {
+    return pendingTripFrom(JSON.parse(localStorage.getItem(PENDING_TRIP) ?? "null") as unknown);
+  } catch {
+    return null;
+  }
+}
+
+function dropTrip() {
+  try {
+    localStorage.removeItem(PENDING_TRIP);
+  } catch {
+    /* private mode */
+  }
+}
 
 export interface Fix {
   lat: number;
@@ -84,6 +114,7 @@ export interface TripSummaryState {
   notes: string[];
   saved: "no" | "saving" | "saved" | "error";
   saveError: string;
+  held: boolean;
   sessionId: string | null;
   intelligence: TripIntelligence;
 }
@@ -100,8 +131,13 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
-export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
+const ROUTE_HOLD = "nokware-route-hold";
+
+export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off", marks: MapMark[] = []) {
   const router = useRouter();
+  const marksRef = useRef(marks);
+  marksRef.current = marks;
+  const restoredHold = useRef(false);
   const providerOff = mapProviderId() === "off";
   const frames = useMemo(() => buildDemoFrames(), []);
   const [phase, setPhase] = useState<Phase>("browse");
@@ -112,6 +148,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
   const [searchOpen, setSearchOpen] = useState(false);
   const [recents, setRecents] = useState<PlaceHit[]>([]);
   const [destination, setDestination] = useState<PlaceHit | null>(null);
+  const [stop, setStop] = useState<PlaceHit | null>(null);
   const [origin, setOrigin] = useState<GeoPoint>(ACCRA_CENTRE);
   const [originLabel, setOriginLabel] = useState("Central Accra");
   const [originIsUser, setOriginIsUser] = useState(false);
@@ -206,6 +243,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
   const puckPoint: GeoPoint | null = frame ? frame.point : onRoute && matched ? matched.snapped : fix;
   const speedKnown = Boolean(frame) || (fix != null && fix.trust !== "wait" && fix.speedKph != null);
   const speed = frame ? frame.speedKph : (fix?.speedKph ?? 0);
+  const headingKnown = frame != null || fix?.heading != null || Boolean(onRoute && matched);
   const bearing = frame?.bearing ?? fix?.heading ?? (onRoute && matched ? matched.bearing : 0);
   const limit = speedLimitProvider.getApplicableSpeedLimit({
     at: frame ? "demo-script" : new Date().toISOString(),
@@ -217,6 +255,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
   const upcoming = speedLimitProvider.getUpcomingSpeedLimitChanges(frame?.upcoming ?? null);
   const progress = frame ? { traveledM: 0, remainingM: frame.remainingM, offRouteM: 0 } : matched;
   const instruction = frame?.instruction ?? (progress && selected ? nextInstruction(progress.traveledM, selected.steps) : null);
+  const thenCue = frame || !progress || !selected || !instruction ? null : followingInstruction(progress.traveledM, selected.steps);
   const etaMin = frame
     ? frame.etaMin
     : progress && selected
@@ -227,12 +266,24 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
   const night = prefersNight(new Date(), appearance);
   const locKind = frame ? "demo" : fix && Date.now() - fix.at > 20_000 ? "stale" : loc === "ok" && fix && fix.accuracy > 50 ? "weak" : loc === "idle" ? "ok" : loc;
   const moving = speedKnown && !demoOn && !frame && speed > 8;
+  const traveledBucket = progress ? Math.floor(progress.traveledM / 80) * 80 : 0;
+  const guiding = !frame && selected && progress && (phase === "navigating" || phase === "recalculating") && traveledBucket > 80;
+  const turnPoint = !frame && selected && progress
+    ? selected.steps.find((step) => step.kind !== "depart" && step.kind !== "arrive" && step.distanceFromStartM >= progress.traveledM - 20)?.at ?? null
+    : null;
+  const along = guiding && selected ? splitRoute(selected.geometry, traveledBucket) : null;
   const lines = frame
     ? [
         ...(frame.fadedGeometry ? [{ id: "faded", points: frame.fadedGeometry, active: false, faded: true }] : []),
         { id: "demo", points: frame.geometry, active: true, faded: false },
       ]
-    : routes.map((route) => ({ id: route.id, points: route.geometry, active: route.id === (selected?.id ?? ""), faded: false }));
+    : along && selected
+      ? [
+          ...routes.filter((route) => route.id !== selected.id).map((route) => ({ id: route.id, points: route.geometry, active: false, faded: true })),
+          { id: `${selected.id}-done`, points: along.done, active: false, faded: true },
+          { id: selected.id, points: along.left, active: true, faded: false },
+        ]
+      : routes.map((route) => ({ id: route.id, points: route.geometry, active: route.id === (selected?.id ?? ""), faded: false }));
 
   useEffect(() => {
     void provider.current.initialize();
@@ -478,18 +529,61 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       }
       setSearching(true);
       setSearchError("");
+      const local = localPlaceHits(text, ws.places, marksRef.current);
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        setSearching(false);
+        setResults(local);
+        setSearchError(local.length ? "" : "Search needs a connection. Saved places already on this screen stay available.");
+        return;
+      }
       const result = await services.current.search.searchPlaces(text);
       setSearching(false);
       if (!result.ok) {
-        setSearchError(result.message);
-        setResults([]);
+        if (local.length) {
+          setResults(local);
+          setSearchError("");
+        } else {
+          setSearchError(result.message);
+          setResults([]);
+        }
         return;
       }
-      setResults(result.places);
-      if (!result.places.length) setSearchError("No places matched.");
+      const places = mergePlaceHits(local, result.places);
+      setResults(places);
+      if (!places.length) setSearchError("No places matched.");
     }, 300);
     return () => window.clearTimeout(handle);
   }, [query]);
+
+  useEffect(() => {
+    if (restoredHold.current || ws.mode !== "user") return;
+    restoredHold.current = true;
+    try {
+      const held = routeHoldFrom(JSON.parse(sessionStorage.getItem(ROUTE_HOLD) || "null"));
+      if (!held) return;
+      setDestination(held.destination);
+      setRoutes(held.routes);
+      setSelectedId(held.selectedId);
+      setPhase("preview");
+      setBanner("The route already on this phone is back.");
+    } catch {
+      /* private mode or a damaged hold */
+    }
+  }, [ws.mode]);
+
+  useEffect(() => {
+    if (!restoredHold.current || ws.mode !== "user" || demoOn) return;
+    const keeping = Boolean(destination && routes.length > 0 && (phase === "preview" || phase === "navigating" || phase === "recalculating" || phase === "offer"));
+    try {
+      if (!keeping) {
+        sessionStorage.removeItem(ROUTE_HOLD);
+        return;
+      }
+      sessionStorage.setItem(ROUTE_HOLD, JSON.stringify({ at: Date.now(), destination, routes, selectedId }));
+    } catch {
+      /* private mode */
+    }
+  }, [demoOn, destination, phase, routes, selectedId, ws.mode]);
 
   useEffect(() => {
     if (phase !== "navigating" || !instruction) return;
@@ -559,7 +653,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       setOriginLabel(fix ? "Your location" : "Central Accra");
       setOriginPinned(false);
     }
-    const result = await services.current.navigation.calculateRoute(from, hit, travelMode);
+    const result = await services.current.navigation.calculateRoute(from, hit, travelMode, stop && haversine(stop, hit) > 40 ? stop : null);
     if (!result.ok) {
       setRoutes([]);
       setRouteError(result.message);
@@ -578,7 +672,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
   async function changeMode(mode: TravelMode) {
     setTravelMode(mode);
     if (!destination || demoOn) return;
-    const result = await services.current.navigation.calculateRoute(origin, destination, mode);
+    const result = await services.current.navigation.calculateRoute(origin, destination, mode, stop);
     if (!result.ok) {
       setRouteError(`${mode === "driving" ? "Driving" : mode === "walking" ? "Walking" : "Cycling"} routes are not available right now.`);
       return;
@@ -635,7 +729,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     if (!fix || !destination) return;
     setPhase("recalculating");
     setBanner("Recalculating…");
-    const result = await services.current.navigation.calculateRoute(fix, destination, travelMode);
+    const result = await services.current.navigation.calculateRoute(fix, destination, travelMode, stop);
     if (!result.ok) {
       setBanner(online ? result.message : "Connection lost. Navigation may use the route already on this phone.");
       setPhase("navigating");
@@ -699,6 +793,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
         }, "Demonstration congestion is scripted. It is not live traffic."),
         saved: "no",
         saveError: "",
+        held: false,
         sessionId: null,
       });
       setPhase("summary");
@@ -736,6 +831,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       }, "Traffic is not available from this provider. Routes were ordered by estimated time."),
       saved: canSave ? "saving" : "no",
       saveError: "",
+      held: false,
       sessionId: null,
     });
     setPhase("summary");
@@ -749,7 +845,8 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       metadata: { destination: destination?.name ?? "" },
     }));
     if (!canSave || !startedAt.current) return;
-    const saved = await saveSessionAction({
+    const pending: PendingTrip = {
+      clientId: startedAt.current,
       vehicleId: ws.activeVehicle?.id ?? null,
       startedAt: startedAt.current,
       endedAt: end.toISOString(),
@@ -762,10 +859,71 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       distanceM,
       geometry: selected ? decimate(selected.geometry, 40) : undefined,
       notes: noteList,
+      raining: (() => {
+        try {
+          return window.localStorage.getItem("nokware-field-rain") === "yes";
+        } catch {
+          return false;
+        }
+      })(),
+    };
+    const saved = await sendTrip(pending);
+    setSummary((current) => current && {
+      ...current,
+      saved: saved.ok ? "saved" : "error",
+      saveError: saved.ok ? "" : saved.keep ? "This trip is still on this phone." : saved.error,
+      held: !saved.ok && saved.keep,
+      sessionId: saved.id || null,
     });
-    setSummary((current) => current && { ...current, saved: saved.ok ? "saved" : "error", saveError: saved.error, sessionId: saved.id || null });
     if (saved.ok) router.refresh();
   }
+
+  async function sendTrip(pending: PendingTrip) {
+    holdTrip(pending);
+    try {
+      const saved = await saveSessionAction(pending);
+      if (saved.ok || !saved.keep) dropTrip();
+      return saved;
+    } catch {
+      return { ok: false as const, error: "This trip is still on this phone.", id: "", keep: true };
+    }
+  }
+
+  async function retrySave() {
+    const pending = heldTrip();
+    if (!pending || ws.mode !== "user") return;
+    setSummary((current) => current && { ...current, saved: "saving", saveError: "", held: false });
+    const saved = await sendTrip(pending);
+    setSummary((current) => current && {
+      ...current,
+      saved: saved.ok ? "saved" : "error",
+      saveError: saved.ok ? "" : saved.keep ? "This trip is still on this phone." : saved.error,
+      held: !saved.ok && saved.keep,
+      sessionId: saved.id || null,
+    });
+    if (saved.ok) {
+      setBanner("The last trip is saved.");
+      router.refresh();
+    }
+  }
+
+  useEffect(() => {
+    if (ws.mode !== "user") return;
+    const pending = heldTrip();
+    if (!pending) return;
+    let cancel = false;
+    void sendTrip(pending).then((saved) => {
+      if (cancel || !saved.ok) {
+        if (!cancel && saved.keep) setBanner("A trip is still on this phone.");
+        return;
+      }
+      setBanner("The last trip is saved.");
+      router.refresh();
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [router, ws.mode]);
 
   function allowLocation() {
     localStorage.setItem("nokware-location-consent", "yes");
@@ -881,7 +1039,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     };
   }
 
-  async function pickPoint(point: GeoPoint, known?: { name: string; address: string }) {
+  async function pickPoint(point: GeoPoint, known?: { name: string; address: string; phone?: string | null; hours?: string | null; keepName?: boolean }) {
     if (phase === "summary" || phase === "offer") return;
     const token = ++pinToken.current;
     setPin(point);
@@ -893,6 +1051,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       setPhase("browse");
       setRoutes([]);
       setDestination(null);
+      setStop(null);
     }
     if (!inGhana(point)) {
       setPinPlace(blankPin("Outside Ghana", "Routing is set up for places in Ghana."));
@@ -906,8 +1065,14 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       const body = (await response.json()) as { place?: MapPin | null; busy?: boolean };
       if (token !== pinToken.current) return;
       if (body.place) {
-        const next = known && body.place.name === "Dropped pin" ? { ...body.place, name: known.name, address: body.place.address || known.address } : body.place;
+        const next = known?.keepName
+          ? { ...body.place, name: known.name, address: known.address || body.place.address, phone: known.phone ?? body.place.phone, hours: known.hours ?? body.place.hours, hoursSource: known.hours ? "USER_PROVIDED" as const : body.place.hoursSource }
+          : known && body.place.name === "Dropped pin"
+            ? { ...body.place, name: known.name, address: body.place.address || known.address }
+            : body.place;
         setPinPlace(next);
+      } else if (known?.keepName) {
+        setPinPlace({ ...blankPin(known.name, known.address), phone: known.phone ?? null, hours: known.hours ?? null, hoursSource: known.hours ? "USER_PROVIDED" : undefined });
       } else if (body.busy) {
         setPinNote("OpenStreetMap is a little busy. You can still get directions.");
       } else if (!known) {
@@ -973,7 +1138,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       setPhase("preview");
       setRouteError("");
       setDemoOn(false);
-      const result = await services.current.navigation.calculateRoute(hit, destination, travelMode);
+      const result = await services.current.navigation.calculateRoute(hit, destination, travelMode, stop);
       if (!result.ok) {
         setRoutes([]);
         setRouteError(result.message);
@@ -987,6 +1152,74 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     }
     setSearchOpen(true);
     setBanner(`Starting from ${hit.name}. Choose where to go.`);
+  }
+
+  async function addStop() {
+    const hit = pinHit();
+    if (!hit) return;
+    if (moving && (phase === "navigating" || phase === "recalculating")) {
+      setPinNote("Pull over to change the route.");
+      return;
+    }
+    if (!destination) {
+      setPinNote("Choose where you are going, then add one stop.");
+      return;
+    }
+    if (!inGhana(hit)) {
+      setPinNote("Routing is set up for places in Ghana.");
+      return;
+    }
+    const gate = destinationAllowed(`${hit.name} ${hit.address}`);
+    if (!gate.ok) {
+      setPinNote(gate.reason);
+      return;
+    }
+    if (haversine(hit, destination) < 40) {
+      setPinNote("That is already the destination.");
+      return;
+    }
+    const from = originLocked.current ? originRef.current : (fix ?? origin);
+    if (haversine(hit, from) < 40) {
+      setPinNote("That is where this route starts.");
+      return;
+    }
+    if (stop && haversine(hit, stop) < 40) {
+      setPinNote("That stop is already on the route.");
+      return;
+    }
+    const result = await services.current.navigation.calculateRoute(from, destination, travelMode, hit);
+    if (!result.ok) {
+      setRouteError(result.message);
+      setPinNote(result.message);
+      return;
+    }
+    setStop(hit);
+    setPinNote(`Stop added. The route still ends at ${destination.name}.`);
+    setRouteError("");
+    setRoutes(result.routes);
+    setSelectedId(result.routes[0].id);
+    setPhase("preview");
+    setLastRouteAt(Date.now());
+    setFitToken((value) => value + 1);
+  }
+
+  async function clearStop() {
+    if (!destination) {
+      setStop(null);
+      return;
+    }
+    const from = originLocked.current ? originRef.current : (fix ?? origin);
+    const result = await services.current.navigation.calculateRoute(from, destination, travelMode, null);
+    if (!result.ok) {
+      setRouteError(result.message);
+      return;
+    }
+    setStop(null);
+    setRouteError("");
+    setRoutes(result.routes);
+    setSelectedId(result.routes[0].id);
+    setLastRouteAt(Date.now());
+    setFitToken((value) => value + 1);
   }
 
   async function savePin(slot: PlaceView["slot"]) {
@@ -1018,6 +1251,10 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
 
   async function findNearby(query: string) {
     if (!pin) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setPinNote("Nearby search needs a connection. Places already listed stay on this screen.");
+      return;
+    }
     setNearbyBusy(true);
     setPinNote("");
     try {
@@ -1143,10 +1380,13 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     gpsLine,
     consentReady,
     bearing,
+    headingKnown,
     limit,
     upcoming,
     progress,
     instruction,
+    thenCue,
+    turn: turnPoint,
     etaMin,
     etaLabel: etaMin == null ? null : etaClock(new Date(), etaMin),
     status,
@@ -1176,6 +1416,9 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     pickSaved,
     clearPin,
     directionsToPin,
+    addStop,
+    clearStop,
+    stop,
     departFromPin,
     savePin,
     sharePin,
@@ -1202,6 +1445,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
     removeRecent,
     removeTrip,
     discardSummary,
+    retrySave,
     closePreview: () => {
       originLocked.current = false;
       setOriginPinned(false);
@@ -1209,6 +1453,7 @@ export function useDrive(ws: Workspace, initialVoice: VoiceMode = "off") {
       setPhase("browse");
       setRoutes([]);
       setDestination(null);
+      setStop(null);
       setRouteError("");
       setDemoOn(false);
       setSummary(null);

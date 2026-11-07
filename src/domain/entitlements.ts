@@ -48,6 +48,17 @@ export function canAddVehicle(plan: PlanId, current: number): { ok: boolean; rea
   return { ok: true, reason: "" };
 }
 
+export function activePlanLine(entitlements: Entitlements): string {
+  const items = [
+    entitlements.maxVehicles === 1 ? "1 vehicle" : `${entitlements.maxVehicles} vehicles`,
+    entitlements.historicalAnalytics ? "six-month score history" : "the current score windows",
+    entitlements.extraReminders ? "earlier document reminders" : "30- and 7-day reminders",
+  ];
+  if (entitlements.ai) items.push("Driver Intelligence");
+  if (entitlements.fleet) items.push("a fleet dashboard");
+  return `On this account today: ${items.join(", ")}. Requesting a plan does not charge anyone, and a paid plan stays inactive until checkout exists.`;
+}
+
 export function reminderLeads(plan: PlanId): number[] {
   return entitlementsFor(plan).extraReminders ? [45, 30, 14, 7, 1, 0] : [30, 7, 0];
 }

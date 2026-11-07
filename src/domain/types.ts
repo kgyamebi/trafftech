@@ -123,13 +123,25 @@ export interface DocumentRecord {
   label: string;
   expiresOn: string | null;
   updatedAt: string;
-  verification: "user_provided" | "not_verified";
+  verification: "user_provided" | "not_verified" | "accepted" | "refused";
   fileName: string | null;
   storedName: string | null;
   mime: string | null;
   note: string;
+  reading?: DocumentReading | null;
   source: DataSource;
   dataClass: DataClass;
+}
+
+export interface DocumentReading {
+  kept: string[];
+  fields: { label: string; value: string; derived: boolean }[];
+  passes: number;
+  dropped: number;
+  confidence: "high" | "partial" | "none";
+  resource: string;
+  decision: "accepted" | "refused";
+  reasons: string[];
 }
 
 export interface ViolationRecord {
@@ -218,6 +230,7 @@ export interface DrivingSessionRecord {
   distanceM?: number;
   geometry?: { lat: number; lng: number }[];
   notes?: string[];
+  clientId?: string;
 }
 
 export interface SavedPlaceRecord {
@@ -313,6 +326,112 @@ export interface AIAnswer {
   provider: "local" | "openai" | "anthropic";
 }
 
+export interface FieldConsentRecord {
+  userId: string;
+  country: string;
+  sharing: boolean;
+  updatedAt: string;
+}
+
+export interface RoadShare {
+  userId: string;
+  samples: number;
+  speedSum: number;
+}
+
+export interface RoadCellRecord {
+  id: string;
+  country: string;
+  cell: string;
+  kind: "hour" | "holiday" | "rain" | "event";
+  dow: number;
+  hour: number;
+  holiday: string;
+  eventId: string;
+  samples: number;
+  speedSum: number;
+  shares: RoadShare[];
+  updatedAt: string;
+  settledAt?: string;
+  source: "CALCULATED";
+}
+
+export interface LessonRecord {
+  id: string;
+  users: string[];
+  updatedAt: string;
+}
+
+export type FieldReportStatus = "open" | "held" | "confirmed" | "hidden" | "expired";
+
+export interface FieldReportRecord {
+  id: string;
+  country: string;
+  kind: string;
+  lat: number;
+  lng: number;
+  cell: string;
+  reporterId: string;
+  note: string;
+  priceGhs: number | null;
+  createdAt: string;
+  confirmations: string[];
+  disputes: string[];
+  status: FieldReportStatus;
+  credited: boolean;
+  penalised: boolean;
+  source: "USER_PROVIDED";
+}
+
+export interface CommunityPlaceRecord {
+  id: string;
+  country: string;
+  kind: string;
+  name: string;
+  note: string;
+  phone?: string;
+  hours?: string;
+  services?: string;
+  lat: number;
+  lng: number;
+  cell: string;
+  reporterId: string;
+  createdAt: string;
+  confirmations: string[];
+  disputes: string[];
+  status: "open" | "confirmed" | "hidden";
+  source: "USER_PROVIDED";
+}
+
+export interface ReporterStandingRecord {
+  userId: string;
+  submitted: number;
+  confirmedByOthers: number;
+  hidden: number;
+}
+
+export interface AskRecord {
+  id: string;
+  userId: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface FieldEventRecord {
+  id: string;
+  country: string;
+  name: string;
+  lat: number;
+  lng: number;
+  cell: string;
+  startsAt: string;
+  endsAt: string;
+  reporterId: string;
+  confirmations: string[];
+  status: "open" | "confirmed" | "hidden";
+  source: "USER_PROVIDED";
+}
+
 export interface Database {
   users: UserRecord[];
   credentials: { userId: string; salt: string; hash: string }[];
@@ -332,6 +451,16 @@ export interface Database {
   audit: AuditRecord[];
   places: SavedPlaceRecord[];
   expenses: ExpenseRecord[];
+  fieldConsents: FieldConsentRecord[];
+  roadCells: RoadCellRecord[];
+  fieldReports: FieldReportRecord[];
+  communityPlaces: CommunityPlaceRecord[];
+  reporterStanding: ReporterStandingRecord[];
+  fieldEvents: FieldEventRecord[];
+  fieldFolds: string[];
+  lessons: LessonRecord[];
+  asks: AskRecord[];
+  livingDay: string;
 }
 
 export interface Entitlements {
@@ -405,12 +534,15 @@ export interface DocumentView {
   updatedAt: string;
   status: DerivedDocStatus;
   daysRemaining: number | null;
-  verification: "user_provided" | "not_verified";
+  verification: "user_provided" | "not_verified" | "accepted" | "refused";
   verificationLabel: string;
+  decision: "accepted" | "refused" | "entered";
+  reasons: string[];
   hasFile: boolean;
   fileName: string | null;
   mime: string | null;
   note: string;
+  reading: DocumentReading | null;
   source: DataSource;
 }
 

@@ -3,8 +3,10 @@ import { mapProviderId } from "@/config/maps";
 import { inGhana, readReverse } from "@/domain/navigation";
 import { parseMaxspeed } from "@/domain/road-limit";
 import { rateLimit } from "@/server/rate-limit";
+import { getSession } from "@/server/session";
 
 export async function GET(req: NextRequest) {
+  if (!(await getSession())) return NextResponse.json({ label: null, place: null }, { status: 401 });
   if (mapProviderId() === "off") return NextResponse.json({ label: null, place: null });
   const lat = Number(req.nextUrl.searchParams.get("lat"));
   const lng = Number(req.nextUrl.searchParams.get("lng"));

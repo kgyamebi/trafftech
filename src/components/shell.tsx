@@ -15,6 +15,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { commandSearch } from "@/domain/command";
 import type { Workspace } from "@/domain/types";
 import { exitDemoAction, logoutAction } from "@/server/actions";
@@ -30,6 +31,7 @@ const MOBILE = [
 const DESK = [
   { href: "/home", label: "Home" },
   { href: "/drive", label: "Drive" },
+  { href: "/roads", label: "Roads" },
   { href: "/vehicle", label: "Vehicle" },
   { href: "/traffic", label: "Traffic" },
   { href: "/score", label: "Driver score" },
@@ -43,6 +45,7 @@ const DESK = [
 
 export function AppShell({ workspace, children }: { workspace: Workspace; children: React.ReactNode }) {
   const path = usePathname();
+  const reduce = useReducedMotion();
   const drive = path === "/home" || path === "/now" || path.startsWith("/drive");
   const [open, setOpen] = useState(false);
   const unread = workspace.notifications.filter((n) => !n.read && !n.archived).length;
@@ -98,13 +101,20 @@ export function AppShell({ workspace, children }: { workspace: Workspace; childr
                 href={item.href}
                 data-active={active}
                 className={clsx(
-                  "flex min-h-11 items-center justify-between rounded-[10px] px-3 text-[15px]",
-                  active ? "bg-sunken text-ink" : "text-muted hover:bg-sunken/70 hover:text-ink",
+                  "relative flex min-h-11 items-center justify-between rounded-[10px] px-3 text-[15px]",
+                  active ? "text-ink" : "text-muted hover:bg-sunken/60 hover:text-ink",
                 )}
               >
-                {item.label}
+                {active ? (
+                  <motion.span
+                    layoutId="desk-pill"
+                    className="pointer-events-none absolute inset-0 rounded-[10px] bg-sunken"
+                    transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 34 }}
+                  />
+                ) : null}
+                <span className="relative">{item.label}</span>
                 {item.href === "/notifications" && unread > 0 ? (
-                  <span className="text-xs text-ink">{unread}</span>
+                  <span className="relative text-xs text-ink">{unread}</span>
                 ) : null}
               </Link>
             );
@@ -139,16 +149,25 @@ export function AppShell({ workspace, children }: { workspace: Workspace; childr
           </div>
         </header>
         <main id="content" className="app-main">
-          {children}
+          <div key={path} className="enter-up">
+            {children}
+          </div>
         </main>
         <nav className="mobile-nav" aria-label="Primary">
           {MOBILE.map((item) => {
             const Icon = item.icon;
             const active = path === item.href || (item.href !== "/home" && path.startsWith(item.href));
             return (
-              <Link key={item.href} href={item.href} className="nav-btn" data-active={active}>
-                <Icon size={18} strokeWidth={1.75} />
-                {item.label}
+              <Link key={item.href} href={item.href} className="nav-btn relative" data-active={active}>
+                {active ? (
+                  <motion.span
+                    layoutId="phone-pill"
+                    className="pointer-events-none absolute inset-1 rounded-[12px] bg-sunken"
+                    transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 32 }}
+                  />
+                ) : null}
+                <Icon className="relative" size={18} strokeWidth={1.75} />
+                <span className="relative">{item.label}</span>
               </Link>
             );
           })}
@@ -186,11 +205,17 @@ function DemoBanner() {
 function CommandPalette({ workspace, onClose }: { workspace: Workspace; onClose: () => void }) {
   const [query, setQuery] = useState("");
   const router = useRouter();
+  const reduce = useReducedMotion();
   const hits = useMemo(() => commandSearch(workspace, query), [workspace, query]);
   return (
     <div className="fixed inset-0 z-50 grid place-items-start bg-ink/40 px-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Command search">
       <button className="absolute inset-0 cursor-default" aria-label="Close search" onClick={onClose} />
-      <div className="card relative z-10 w-full max-w-xl overflow-hidden shadow-soft">
+      <motion.div
+        className="card relative z-10 w-full max-w-xl overflow-hidden shadow-soft"
+        initial={reduce ? false : { opacity: 0, y: 16, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 30 }}
+      >
         <div className="flex items-center gap-3 border-b border-line px-4">
           <Command size={16} />
           <input
@@ -223,7 +248,7 @@ function CommandPalette({ workspace, onClose }: { workspace: Workspace; onClose:
           ))}
           {hits.length === 0 ? <li className="px-4 py-6 text-sm text-muted">Nothing in your records matches that.</li> : null}
         </ul>
-      </div>
+      </motion.div>
     </div>
   );
 }

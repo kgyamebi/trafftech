@@ -70,16 +70,13 @@ export function computeDriverScore(input: {
   };
 
   if (samples.length < MIN_SAMPLES || minutes < MIN_MINUTES) {
-    const missing: string[] = [];
-    if (minutes < MIN_MINUTES) missing.push(`${MIN_MINUTES} minutes of recorded driving`);
-    if (samples.length < MIN_SAMPLES) missing.push(`${MIN_SAMPLES} speed samples`);
     return {
       ...base,
       status: "insufficient",
       overall: null,
       band: null,
       components: null,
-      note: `Not enough driving data yet. A score needs ${missing.join(" and ")}. Practice routes are not saved.`,
+      note: "Not enough driving data yet. Practice routes are not saved.",
     };
   }
 

@@ -1,5 +1,7 @@
 import { emptyDatabase } from "./assemble";
 import { accraToday, addDays } from "./dates";
+import { advanceField } from "./field";
+import { advanceLiving } from "./living";
 import type { Database, DrivingSessionRecord } from "./types";
 
 /** Full speed samples stay for longer than the six-month score window. */
@@ -28,6 +30,15 @@ const LISTS = [
   "audit",
   "places",
   "expenses",
+  "fieldConsents",
+  "roadCells",
+  "fieldReports",
+  "communityPlaces",
+  "reporterStanding",
+  "fieldEvents",
+  "fieldFolds",
+  "lessons",
+  "asks",
 ] as const;
 
 export function normalizeDatabase(parsed: Partial<Database> | null | undefined): Database {
@@ -36,6 +47,7 @@ export function normalizeDatabase(parsed: Partial<Database> | null | undefined):
   for (const key of LISTS) {
     if (!Array.isArray(merged[key])) merged[key] = [];
   }
+  if (typeof merged.livingDay !== "string") merged.livingDay = "";
   return merged;
 }
 
@@ -69,6 +81,8 @@ export function retainRecords(db: Database, now: Date): boolean {
     db.reads = reads;
     changed = true;
   }
+  if (advanceField(db, now)) changed = true;
+  if (advanceLiving(db, now)) changed = true;
   return changed;
 }
 

@@ -6,6 +6,7 @@ import { buildDemoFrames } from "@/domain/navigation";
 import { ONBOARDING_STEPS, onboardingComplete } from "@/domain/onboarding";
 import { completeOnboardingAction } from "@/server/actions";
 import { SchematicMap } from "./nav/schematic";
+import { VoiceChoice } from "./voice-choice";
 
 export function OnboardingScreen({ replay = false }: { replay?: boolean }) {
   const reduce = useReducedMotion();
@@ -28,7 +29,7 @@ export function OnboardingScreen({ replay = false }: { replay?: boolean }) {
           </form>
         </div>
         <div className="mt-6 h-px bg-line" aria-hidden>
-          <div className="h-px bg-ink" style={{ width: `${((step + 1) / ONBOARDING_STEPS.length) * 100}%` }} />
+          <div className="h-px bg-ink transition-[width] duration-500 ease-out" style={{ width: `${((step + 1) / ONBOARDING_STEPS.length) * 100}%` }} />
         </div>
         <p className="eyebrow mt-6">{current.kicker}</p>
         <motion.div
@@ -45,7 +46,8 @@ export function OnboardingScreen({ replay = false }: { replay?: boolean }) {
           {step === 4 ? <NoticeDemo /> : null}
           {step === 5 ? <ScoreDemo /> : null}
           {step === 6 ? <AiDemo /> : null}
-          {step === 7 ? <Ready /> : null}
+          {step === 7 ? <VoiceStep /> : null}
+          {step === 8 ? <Ready /> : null}
         </motion.div>
         <div className="flex items-center justify-between pb-4">
           <button type="button" className="text-sm text-muted" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>
@@ -185,6 +187,18 @@ function AiDemo() {
       <div className="mt-6 max-w-md border-l-2 border-bronze pl-4 text-sm leading-relaxed">
         <p className="eyebrow">Fact</p>
         <p className="mt-2">Your score moved because the components moved. The assistant is not allowed to invent the reason.</p>
+      </div>
+    </div>
+  );
+}
+
+function VoiceStep() {
+  return (
+    <div>
+      <h1 className="display text-5xl">Choose a voice</h1>
+      <p className="mt-4 max-w-md text-muted">Pick who speaks the warning, the direction and the answer. You can change it later in settings.</p>
+      <div className="mt-6">
+        <VoiceChoice />
       </div>
     </div>
   );

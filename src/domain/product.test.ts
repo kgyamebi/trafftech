@@ -9,7 +9,7 @@ import { compliancePercent, documentStatus } from "./compliance";
 import { commandSearch } from "./command";
 import { addDays } from "./dates";
 import { buildDemoWorkspace, demoWritesBlocked } from "./demo";
-import { canAddVehicle, entitlementsFor, reminderLeads } from "./entitlements";
+import { activePlanLine, canAddVehicle, entitlementsFor, reminderLeads } from "./entitlements";
 import { estimateAutomatedFine, estimateLateAddition, estimateSpeedFine } from "./fines";
 import { isEvasionRequest, parseTrafficMessage } from "./inbox";
 import { explainScoreChange } from "./insights";
@@ -199,6 +199,9 @@ describe("fines, inbox and entitlements", () => {
     expect(canAddVehicle("free", 1).ok).toBe(false);
     expect(canAddVehicle("pro", 1).ok).toBe(true);
     expect(entitlementsFor("free").ai).toBe(false);
+    expect(activePlanLine(entitlementsFor("free"))).toMatch(/1 vehicle/);
+    expect(activePlanLine(entitlementsFor("free"))).toMatch(/does not charge/);
+    expect(activePlanLine(entitlementsFor("pro"))).toMatch(/Driver Intelligence/);
     expect(entitlementsFor("pro").historicalAnalytics).toBe(true);
     expect(reminderLeads("free")).toEqual([30, 7, 0]);
     expect(leadBucket(27, reminderLeads("free"))).toBe(30);
@@ -225,7 +228,8 @@ describe("ai, onboarding, demo isolation", () => {
   it("lets a skipped tour finish and keeps demo writes out of user mode", () => {
     expect(onboardingComplete({ skipped: true, stepIndex: 0 })).toBe(true);
     expect(onboardingComplete({ skipped: false, stepIndex: 3 })).toBe(false);
-    expect(onboardingComplete({ skipped: false, stepIndex: 7 })).toBe(true);
+    expect(onboardingComplete({ skipped: false, stepIndex: 7 })).toBe(false);
+    expect(onboardingComplete({ skipped: false, stepIndex: 8 })).toBe(true);
     expect(demoWritesBlocked("demo")).toBe(true);
     expect(demoWritesBlocked("user")).toBe(false);
     const ws = buildDemoWorkspace(NOW);

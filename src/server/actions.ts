@@ -5,9 +5,8 @@ import { z, ZodError } from "zod";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { analyzeContest } from "@/domain/ai";
+import { analyzeContest, localDriverAnswer } from "@/domain/ai";
 import { parseDrivePrefs } from "@/domain/drive-prefs";
-import { isEvasionRequest } from "@/domain/inbox";
 import { cleanText } from "@/domain/clean";
 import type { AIAnswer, NotificationPrefs, PlanId } from "@/domain/types";
 import {
@@ -37,6 +36,7 @@ import { answerWithProvider } from "./ai-provider";
 import { rateLimit } from "./rate-limit";
 import { clearSession, getSession, setSession } from "./session";
 import { dataDir, updateDatabase } from "./store";
+import { addAsk, addCommunityPlace, addFieldEvent, addFieldReport, agreeCommunityPlace, agreeFieldEvent, agreeFieldReport, editCommunityPlace, removeFieldShare, reportCommunityPlace, setFieldSharing } from "./field-store";
 import { loadWorkspace } from "./workspace";
 
 function dir() {
@@ -176,6 +176,7 @@ export async function saveDocumentAction(_prev: { error: string }, formData: For
       label: String(formData.get("label") ?? ""),
       expiresOn: String(formData.get("expiresOn") ?? ""),
       note: String(formData.get("note") ?? ""),
+      reading: String(formData.get("reading") ?? ""),
     });
     const file = formData.get("file");
     if (file instanceof File && file.size > 0) {
@@ -234,17 +235,20 @@ export async function saveSessionAction(payload: {
   destinationLabel?: string;
   distanceM?: number;
   geometry?: { lat: number; lng: number }[];
-  notes?: string[];
+      notes?: string[];
+  raining?: boolean;
+  clientId?: string;
 }) {
   try {
     const uid = await userId();
     const row = await saveDrivingSession(dir(), uid, { ...payload, driverId: null });
     revalidatePath("/score");
     revalidatePath("/drive");
-    return { ok: true as const, error: "", id: row.id };
+    return { ok: true as const, error: "", id: row.id, keep: false };
   } catch (error) {
     rethrowRedirect(error);
-    return { ok: false as const, error: error instanceof AccountError ? error.message : "Could not save the drive.", id: "" };
+    const refused = error instanceof AccountError;
+    return { ok: false as const, error: refused ? error.message : "Could not save the drive.", id: "", keep: !refused };
   }
 }
 
@@ -430,37 +434,13 @@ export async function contestAction(_prev: { error: string; answer: AIAnswer | n
 
 export async function askAction(_prev: { error: string; answer: AIAnswer | null }, formData: FormData) {
   try {
-    const question = cleanText(formData.get("question"), 500);
-    if (!question) return { error: "Ask a question about your records.", answer: null };
+    const question = cleanText(formData.get("question"), 1200);
+    if (!question) return { error: "Ask about a document, a notice, your score, or the next thing to do.", answer: null };
     const ws = await loadWorkspace();
-    if (isEvasionRequest(question)) {
-      const answer = await answerWithProvider(ws, question);
-      return { error: "", answer };
-    }
-    if (!ws.entitlements.ai) {
-      return {
-        error: "",
-        answer: {
-          title: "Pro keeps the conversation",
-          confidenceNote: "No model was called.",
-          refused: false,
-          provider: "local" as const,
-          sections: [
-            {
-              kind: "FACT" as const,
-              heading: "What stays free",
-              body: "Your score breakdown, documents and notices are already on their own screens. They are calculations and records, not a chat.",
-            },
-            {
-              kind: "RECOMMENDATION" as const,
-              heading: "Ask Driver Intelligence",
-              body: "The conversational layer is part of Pro. Requesting Pro does not charge you. Payment collection is not connected.",
-            },
-          ],
-        },
-      };
-    }
-    const answer = await answerWithProvider(ws, question);
+    const history = ws.questions.slice(-8).map((item) => item.question);
+    const answer = ws.entitlements.ai
+      ? await answerWithProvider(ws, question, "ask", history)
+      : localDriverAnswer(ws, question, "ask", history);
     if (ws.mode === "user") {
       const uid = await userId();
       await updateDatabase(dir(), (db) => {
@@ -468,6 +448,7 @@ export async function askAction(_prev: { error: string; answer: AIAnswer | null 
         db.questions = db.questions.filter((q) => q.userId !== uid).concat(db.questions.filter((q) => q.userId === uid).slice(-20));
       });
     }
+    revalidatePath("/ask");
     return { error: "", answer };
   } catch (error) {
     return { error: error instanceof AccountError ? error.message : "Could not answer that.", answer: null };
@@ -540,6 +521,143 @@ export async function saveEmergencyAction(_prev: { error: string }, formData: Fo
     rethrowRedirect(error);
     return fail(error);
   }
+}
+
+function formOf(prevOrForm: { error: string } | FormData, formData?: FormData): FormData {
+  if (formData instanceof FormData) return formData;
+  if (prevOrForm instanceof FormData) return prevOrForm;
+  return new FormData();
+}
+
+async function fieldCall(run: () => Promise<unknown>): Promise<{ error: string }> {
+  try {
+    await run();
+    revalidatePath("/roads");
+    return { error: "" };
+  } catch (error) {
+    rethrowRedirect(error);
+    return { error: error instanceof AccountError ? error.message : "That could not be saved." };
+  }
+}
+
+export async function setFieldSharingAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await setFieldSharing(dir(), uid, data.get("sharing") === "yes");
+  });
+}
+
+export async function removeFieldShareAction() {
+  return fieldCall(async () => {
+    const uid = await userId();
+    await removeFieldShare(dir(), uid);
+  });
+}
+
+export async function submitFieldReportAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    const price = String(data.get("priceGhs") ?? "").trim();
+    await addFieldReport(dir(), uid, {
+      kind: String(data.get("kind") ?? ""),
+      lat: Number(data.get("lat")),
+      lng: Number(data.get("lng")),
+      note: cleanText(String(data.get("note") ?? ""), 140),
+      priceGhs: price ? Number(price) : null,
+    });
+  });
+}
+
+export async function confirmFieldReportAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await agreeFieldReport(dir(), uid, String(data.get("id") ?? ""), data.get("agree") !== "no");
+  });
+}
+
+export async function submitCommunityPlaceAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await addCommunityPlace(dir(), uid, {
+      kind: String(data.get("kind") ?? ""),
+      name: cleanText(String(data.get("name") ?? ""), 60),
+      note: cleanText(String(data.get("note") ?? ""), 140),
+      phone: cleanText(String(data.get("phone") ?? ""), 40),
+      hours: cleanText(String(data.get("hours") ?? ""), 80),
+      services: cleanText(String(data.get("services") ?? ""), 80),
+      lat: Number(data.get("lat")),
+      lng: Number(data.get("lng")),
+    });
+  });
+}
+
+export async function editCommunityPlaceAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await editCommunityPlace(dir(), uid, {
+      id: String(data.get("id") ?? ""),
+      name: cleanText(String(data.get("name") ?? ""), 60),
+      note: cleanText(String(data.get("note") ?? ""), 140),
+      phone: cleanText(String(data.get("phone") ?? ""), 40),
+      hours: cleanText(String(data.get("hours") ?? ""), 80),
+      services: cleanText(String(data.get("services") ?? ""), 80),
+    });
+  });
+}
+
+export async function reportCommunityPlaceAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await reportCommunityPlace(dir(), uid, {
+      placeId: String(data.get("id") ?? ""),
+      reason: String(data.get("reason") ?? ""),
+      note: cleanText(String(data.get("note") ?? ""), 140),
+    });
+  });
+}
+
+export async function submitAskAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await addAsk(dir(), uid, cleanText(String(data.get("text") ?? ""), 140));
+  });
+}
+
+export async function confirmCommunityPlaceAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await agreeCommunityPlace(dir(), uid, String(data.get("id") ?? ""));
+  });
+}
+
+export async function submitFieldEventAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await addFieldEvent(dir(), uid, {
+      name: cleanText(String(data.get("name") ?? ""), 60),
+      lat: Number(data.get("lat")),
+      lng: Number(data.get("lng")),
+      startsAt: String(data.get("startsAt") ?? ""),
+      endsAt: String(data.get("endsAt") ?? ""),
+    });
+  });
+}
+
+export async function confirmFieldEventAction(prev: { error: string } | FormData, formData?: FormData) {
+  const data = formOf(prev, formData);
+  return fieldCall(async () => {
+    const uid = await userId();
+    await agreeFieldEvent(dir(), uid, String(data.get("id") ?? ""));
+  });
 }
 
 export async function deleteAccountAction() {

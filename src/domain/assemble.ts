@@ -1,4 +1,5 @@
 import { buildAttention, heroFromAttention } from "./attention";
+import { settleReadings, type ResourceKind } from "./extract";
 import { buildAchievements, buildInsights } from "./insights";
 import { compliancePercent, docStatusLabel, documentStatus, standingLabel, statusTone, vehicleStanding, violationAffectsTraffic } from "./compliance";
 import { accraToday, addDays, dayLabel, daysUntil, firstNameOf, formatDay, greetingFor, ghs, minutesBetween } from "./dates";
@@ -52,6 +53,13 @@ export interface AssembleInput {
   places?: SavedPlaceRecord[];
   expenses?: Database["expenses"];
   scoreWindow?: ScoreWindow;
+}
+
+function verdictOf(reading: { kept: string[]; resource: string } | null | undefined, now: Date): { decision: "accepted" | "refused" | "entered"; reasons: string[] } {
+  if (!reading?.kept.length) return { decision: "entered", reasons: [] };
+  const resource = (["image", "pdf", "text", "sheet", "document", "audio", "video", "unknown"].includes(reading.resource) ? reading.resource : "text") as ResourceKind;
+  const again = settleReadings([{ text: reading.kept.join("\n"), label: "Saved" }], resource, now);
+  return { decision: again.decision, reasons: again.reasons };
 }
 
 function sessionView(s: DrivingSessionRecord): SessionView {
@@ -149,6 +157,7 @@ export function assembleWorkspace(input: AssembleInput): Workspace {
 
   const documents: DocumentView[] = input.documents.map((d) => {
     const derived = documentStatus(d.expiresOn, now);
+    const verdict = verdictOf(d.reading, now);
     return {
       id: d.id,
       vehicleId: d.vehicleId,
@@ -159,12 +168,14 @@ export function assembleWorkspace(input: AssembleInput): Workspace {
       status: derived.status,
       daysRemaining: derived.daysRemaining,
       verification: d.verification,
-      verificationLabel:
-        d.verification === "user_provided" ? "User provided · not verified with an authority" : "Not verified",
+      verificationLabel: verdict.decision === "accepted" ? "Accepted" : verdict.decision === "refused" ? "Not accepted" : "Saved from what you entered",
+      decision: verdict.decision,
+      reasons: verdict.reasons,
       hasFile: Boolean(d.storedName),
       fileName: d.fileName,
       mime: d.mime,
       note: d.note,
+      reading: d.reading ?? null,
       source: d.source,
     };
   });
@@ -483,6 +494,16 @@ export function emptyDatabase(): Database {
     audit: [],
     places: [],
     expenses: [],
+    fieldConsents: [],
+    roadCells: [],
+    fieldReports: [],
+    communityPlaces: [],
+    reporterStanding: [],
+    fieldEvents: [],
+    fieldFolds: [],
+    lessons: [],
+    asks: [],
+    livingDay: "",
   };
 }
 

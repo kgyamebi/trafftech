@@ -12,7 +12,7 @@ export interface NavigationProvider {
   readonly sourceLabel: string;
   readonly lanes: boolean;
   readonly predictiveTrafficReroute: boolean;
-  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode): Promise<{ ok: true; routes: RouteOption[] } | { ok: false; message: string }>;
+  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode, via?: GeoPoint | null): Promise<{ ok: true; routes: RouteOption[] } | { ok: false; message: string }>;
 }
 
 export interface TrafficProvider {
@@ -51,7 +51,7 @@ export class UnavailableNavigation implements NavigationProvider {
   readonly lanes = false;
   readonly predictiveTrafficReroute = false;
   constructor(readonly id: string, private readonly label: string) {}
-  async calculateRoute(_from: GeoPoint, _to: GeoPoint, _mode: TravelMode): Promise<{ ok: false; message: string }> {
+  async calculateRoute(_from: GeoPoint, _to: GeoPoint, _mode: TravelMode, _via?: GeoPoint | null): Promise<{ ok: false; message: string }> {
     return { ok: false, message: `${this.label} is not connected.` };
   }
 }

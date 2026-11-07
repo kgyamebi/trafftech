@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { callablePhone } from "@/domain/catalogue";
 import { alertSpeech, briefScript, greetingLine, languageNote, plainAlert, slowDownSpeech, speedBoard } from "@/domain/companion";
 import { accraParts } from "@/domain/dates";
 import type { DrivePrefs, Language } from "@/domain/drive-prefs";
@@ -13,15 +14,19 @@ import type { ProtectionStatus } from "@/domain/protection";
 import type { Workspace } from "@/domain/types";
 import type { useDrive } from "./nav/use-drive";
 import { speak } from "./speak";
+import { DRIVING_BODIES } from "@/domain/vehicle-look";
+import { useVehicleLook, VehicleGlyph } from "./vehicle-picker";
 
 const LIMITS = [30, 50, 90, 100];
 
 export function DrivingScreen({
   nav,
   prefs,
+  look,
 }: {
   nav: ReturnType<typeof useDrive>;
   prefs: DrivePrefs;
+  look: ReturnType<typeof useVehicleLook>;
 }) {
   const [voice, setVoice] = useState(prefs.voice);
   const [showCard, setShowCard] = useState(false);
@@ -116,6 +121,17 @@ export function DrivingScreen({
             <article className="fact">
               <p className="eyebrow">Route</p>
               <p>{direction}</p>
+              <div className="mt-3 flex items-center gap-3">
+                <VehicleGlyph mark={look.mark(nav.travelMode)} bearing={nav.bearing} demo={Boolean(nav.puck?.demo)} size={36} />
+                <label className="text-sm">
+                  This trip
+                  <select className="mt-1 block bg-transparent" value={look.stored?.trip ?? "role"} onChange={(event) => look.choose(event.target.value as "role" | (typeof DRIVING_BODIES)[number]["id"])}>
+                    <option value="role">Usual</option>
+                    {DRIVING_BODIES.map((body) => <option key={body.id} value={body.id}>{body.label}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="cockpit-line">{look.mark(nav.travelMode).note}</p>
             </article>
             <article className="fact">
               <p className="eyebrow">Notice</p>
@@ -265,6 +281,11 @@ function EmergencySheet({ ws, onClose }: { ws: Workspace; onClose: () => void })
           {card.medicalNote ? <div><dt>Note</dt><dd>{card.medicalNote}</dd></div> : null}
         </dl>
         <p className="panel-note">Saved on this phone after you open this card. {ws.mode === "demo" ? "DEMO. Not your records." : "You typed these details."}</p>
+        {callablePhone(card.contactPhone) ? (
+          <a className="cockpit-primary" href={`tel:${callablePhone(card.contactPhone)}`}>Call {card.contactName || "your emergency contact"}</a>
+        ) : (
+          <p className="panel-note">Save a phone number on this card before a call can be placed. This does not call a hospital or the police.</p>
+        )}
         <div className="dialog-actions">
           <button type="button" className="cockpit-primary" onClick={() => speak(text, "en")}>Listen</button>
           <Link className="cockpit-ghost" href="/emergency">Edit</Link>

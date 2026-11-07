@@ -3,10 +3,12 @@ import { mapProviderId } from "@/config/maps";
 import { haversine, inGhana } from "@/domain/navigation";
 import { parseMaxspeed } from "@/domain/road-limit";
 import { rateLimit } from "@/server/rate-limit";
+import { getSession } from "@/server/session";
 
 const NONE = { kph: null, road: null, fresh: true };
 
 export async function GET(req: NextRequest) {
+  if (!(await getSession())) return NextResponse.json(NONE, { status: 401 });
   if (mapProviderId() === "off") return NextResponse.json(NONE);
   const lat = Number(req.nextUrl.searchParams.get("lat"));
   const lng = Number(req.nextUrl.searchParams.get("lng"));

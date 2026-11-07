@@ -15,6 +15,10 @@ export interface PlaceHit {
   address: string;
   lat: number;
   lng: number;
+  source?: "openstreetmap" | "USER_PROVIDED";
+  phone?: string | null;
+  hours?: string | null;
+  priceNote?: string | null;
 }
 
 export interface Maneuver {
@@ -33,6 +37,8 @@ export interface RouteOption {
   steps: Maneuver[];
   trafficAvailable: false;
   trafficNote: string;
+  memoryNote?: string;
+  warnings?: string[];
 }
 
 export type LimitSource = "unavailable" | "user_declared" | "demo_script" | "openstreetmap";
@@ -96,6 +102,8 @@ export interface MapPin {
   phone: string | null;
   website: string | null;
   hours: string | null;
+  /** Who supplied the hours line. Absent means the map. */
+  hoursSource?: "openstreetmap" | "USER_PROVIDED";
   limitKph: number | null;
   source: "openstreetmap";
 }
@@ -468,6 +476,20 @@ export function locationMessage(status: "ok" | "weak" | "denied" | "unavailable"
   return null;
 }
 
+export function parseCoordinateQuery(raw: string): GeoPoint | null {
+  const match = raw.trim().match(/^(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  const lat = Number(match[1]);
+  const lng = Number(match[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+export function coordinatePlace(point: GeoPoint): PlaceHit {
+  const label = `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+  return { id: `coord-${label}`, name: "Coordinates", address: `${label}. The point you typed.`, lat: point.lat, lng: point.lng };
+}
+
 export function destinationAllowed(query: string): { ok: boolean; reason: string } {
   if (isEvasionRequest(query)) {
     return { ok: false, reason: "Nokware will not search for a way around enforcement. Search for a place." };
@@ -477,6 +499,74 @@ export function destinationAllowed(query: string): { ok: boolean; reason: string
 
 export function rankRoutes<T extends { durationS: number; distanceM: number }>(routes: T[]): T[] {
   return [...routes].sort((a, b) => a.durationS - b.durationS || a.distanceM - b.distanceM);
+}
+
+/** The shortest of the routes already returned. It does not ask for a different road. */
+export function shortestRouteId<T extends { id: string; durationS: number; distanceM: number }>(routes: T[]): string | null {
+  if (!routes.length) return null;
+  return [...routes].sort((a, b) => a.distanceM - b.distanceM || a.durationS - b.durationS)[0].id;
+}
+
+/** Straight-line perimeter. Area is the closed shape, and only when asked. Not a driving route. */
+export function shapeMeasure(points: GeoPoint[], closed = true): { perimeterM: number; areaM2: number | null } | null {
+  if (points.length < 2 || points.some((point) => !Number.isFinite(point.lat) || !Number.isFinite(point.lng))) return null;
+  let perimeter = 0;
+  for (let index = 1; index < points.length; index += 1) perimeter += haversine(points[index - 1], points[index]);
+  if (points.length < 3 || !closed) return { perimeterM: Math.round(perimeter), areaM2: null };
+  perimeter += haversine(points[points.length - 1], points[0]);
+  const origin = points[0];
+  const lat0 = (origin.lat * Math.PI) / 180;
+  const xy = points.map((point) => ({
+    x: (point.lng - origin.lng) * Math.cos(lat0) * 111_320,
+    y: (point.lat - origin.lat) * 110_540,
+  }));
+  let sum = 0;
+  for (let index = 0; index < xy.length; index += 1) {
+    const next = xy[(index + 1) % xy.length];
+    sum += xy[index].x * next.y - next.x * xy[index].y;
+  }
+  return { perimeterM: Math.round(perimeter), areaM2: Math.round(Math.abs(sum) / 2) };
+}
+
+export interface PinCluster<T extends GeoPoint & { id: string; name: string }> {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  count: number;
+  ids: string[];
+  places: T[];
+}
+
+/** Group nearby pins when the map is far out. A close view keeps every pin. */
+export function clusterPins<T extends GeoPoint & { id: string; name: string }>(places: T[], zoom: number): PinCluster<T>[] {
+  if (places.length === 0) return [];
+  if (zoom >= 14) {
+    return places.map((place) => ({ id: place.id, name: place.name, lat: place.lat, lng: place.lng, count: 1, ids: [place.id], places: [place] }));
+  }
+  const reach = 50 * 2 ** (14 - Math.max(5, zoom));
+  const groups: PinCluster<T>[] = [];
+  for (const place of places) {
+    const group = groups.find((item) => haversine(item, place) <= reach);
+    if (!group) {
+      groups.push({ id: place.id, name: place.name, lat: place.lat, lng: place.lng, count: 1, ids: [place.id], places: [place] });
+      continue;
+    }
+    group.places.push(place);
+    group.ids.push(place.id);
+    group.count += 1;
+    group.lat = group.places.reduce((sum, item) => sum + item.lat, 0) / group.count;
+    group.lng = group.places.reduce((sum, item) => sum + item.lng, 0) / group.count;
+    group.name = `${group.count} places`;
+    group.id = `cluster:${group.ids[0]}`;
+  }
+  return groups;
+}
+
+/** Zoom that shows each pin. Grouping stops at 14, so a tap must reach at least that. */
+export function clusterOpenZoom(fromZoom: number): number {
+  const zoom = Number.isFinite(fromZoom) ? fromZoom : 10;
+  return Math.min(19, Math.max(14, Math.floor(zoom) + 1));
 }
 
 export function chooseAlert(alerts: NavAlert[]): NavAlert | null {
@@ -627,6 +717,25 @@ export function filterTrips<T extends { endedAt: string }>(trips: T[], window: T
     const to = custom.from <= custom.to ? custom.to : custom.from;
     return day >= from && day <= to;
   });
+}
+
+/** Average time from this account's own drives of a similar length. It never replaces the route estimate. */
+export function similarDriveNote(
+  trips: { distanceM: number | null; minutes: number; simulated?: boolean; source?: string }[],
+  distanceM: number,
+): string | null {
+  if (!Number.isFinite(distanceM) || distanceM < 500) return null;
+  const similar = trips.filter((trip) => {
+    if (trip.simulated || trip.distanceM == null || trip.minutes < 1) return false;
+    const ratio = trip.distanceM / distanceM;
+    return ratio >= 0.8 && ratio <= 1.25;
+  });
+  if (similar.length < 3) return null;
+  const mean = Math.round(similar.reduce((sum, trip) => sum + trip.minutes, 0) / similar.length);
+  const demonstration = similar.every((trip) => trip.source === "DEMO");
+  const whose = demonstration ? "Demonstration drives" : "Your saved drives";
+  const tail = demonstration ? "This is not your driving, and it does not change the estimate." : "Calculated from those trips. This does not change the estimate.";
+  return `${whose} of a similar length, ${similar.length} of them, took about ${mean} min. ${tail}`;
 }
 
 export function tripComparison(current: number | null, previous: number | null): string | null {
@@ -852,12 +961,22 @@ export function summariseScript(frames: DemoFrame[]): {
   return { distanceM, compliance: speedCompliance(samples), harshBrakes: harsh.brakes, harshAccels: harsh.accels, samples };
 }
 
-export function maneuverText(type: string, modifier: string | undefined, name: string): string {
+function exitOrdinal(exit: number | undefined): string {
+  if (exit == null || !Number.isInteger(exit) || exit < 1 || exit > 12) return "";
+  const teen = exit % 100;
+  const suffix = teen >= 11 && teen <= 13 ? "th" : exit % 10 === 1 ? "st" : exit % 10 === 2 ? "nd" : exit % 10 === 3 ? "rd" : "th";
+  return `${exit}${suffix}`;
+}
+
+export function maneuverText(type: string, modifier: string | undefined, name: string, exit?: number): string {
   const onto = name ? ` onto ${name}` : "";
-  if (type === "arrive") return "Arrive";
+  if (type === "arrive") return name ? `Arrive at ${name}` : "Arrive";
   if (type === "depart") return name ? `Head onto ${name}` : "Head out";
-  if (type === "roundabout" || type === "rotary") return "Take the roundabout";
-  if (type === "exit roundabout") return "Exit the roundabout";
+  if (type === "roundabout" || type === "rotary") {
+    const nth = exitOrdinal(exit);
+    return nth ? `Take the ${nth} exit${onto}` : "Take the roundabout";
+  }
+  if (type === "exit roundabout" || type === "exit rotary") return name ? `Exit onto ${name}` : "Exit the roundabout";
   if (type === "off ramp") return modifier?.includes("left") ? "Exit left" : "Exit right";
   if (type === "fork" || type === "merge") return modifier?.includes("left") ? "Keep left" : "Keep right";
   if (type === "turn" || type === "end of road") {
@@ -877,7 +996,14 @@ export function maneuverText(type: string, modifier: string | undefined, name: s
 interface OsrmStep {
   distance?: number;
   name?: string;
-  maneuver?: { type?: string; modifier?: string; location?: [number, number] };
+  maneuver?: { type?: string; modifier?: string; exit?: number; location?: [number, number] };
+  intersections?: { lanes?: { indications?: string[]; valid?: boolean }[] }[];
+}
+
+function lanePhrase(step: OsrmStep): string {
+  const valid = (step.intersections ?? []).flatMap((item) => item.lanes ?? []).filter((lane) => lane.valid && lane.indications?.length);
+  const marks = [...new Set(valid.flatMap((lane) => lane.indications ?? []))].filter(Boolean).slice(0, 3);
+  return marks.length ? ` Use the lane marked ${marks.join(" or ")}.` : "";
 }
 
 interface OsrmRoute {
@@ -905,9 +1031,10 @@ export function parseOsrm(body: unknown): { ok: true; routes: RouteOption[] } | 
       for (const step of leg.steps ?? []) {
         const loc = step.maneuver?.location;
         const at = loc && loc.length >= 2 ? { lng: loc[0], lat: loc[1] } : geometry[0];
+        const spoken = maneuverText(step.maneuver?.type || "continue", step.maneuver?.modifier, step.name || "", step.maneuver?.exit);
         steps.push({
           kind: step.maneuver?.type || "continue",
-          text: maneuverText(step.maneuver?.type || "continue", step.maneuver?.modifier, step.name || ""),
+          text: lanePhrase(step) ? `${spoken.replace(/\.$/, "")}. ${lanePhrase(step).trim()}` : spoken,
           distanceFromStartM: Math.round(cursor),
           at,
         });
@@ -967,6 +1094,78 @@ export function nextInstruction(traveledM: number, steps: Maneuver[]): { text: s
   return { text: upcoming.text, metres: Math.max(0, Math.round(upcoming.distanceFromStartM - traveledM)) };
 }
 
+/** The maneuver after the one currently shown, when the route has one. */
+export function followingInstruction(traveledM: number, steps: Maneuver[]): { text: string; metres: number } | null {
+  const upcoming = steps.filter((step) => step.kind !== "depart" && step.distanceFromStartM >= traveledM - 20);
+  const next = upcoming[1];
+  if (!next || next.text === upcoming[0]?.text) return null;
+  return { text: next.text, metres: Math.max(0, Math.round(next.distanceFromStartM - traveledM)) };
+}
+
+/** Turns on a route before navigation starts. Distance is the stretch before each turn. */
+export function turnList(steps: Maneuver[], limit = 6): { text: string; metres: number }[] {
+  const listed: { text: string; metres: number }[] = [];
+  let previous = 0;
+  for (const step of steps) {
+    if (step.kind === "depart") {
+      previous = step.distanceFromStartM;
+      continue;
+    }
+    if (!step.text || (listed.length && listed[listed.length - 1].text === step.text)) continue;
+    listed.push({ text: step.text, metres: Math.max(0, Math.round(step.distanceFromStartM - previous)) });
+    previous = step.distanceFromStartM;
+    if (listed.length >= limit) break;
+  }
+  return listed;
+}
+
+/** The line already driven, and the line still ahead. The join is the point at traveledM. */
+export function splitRoute(line: GeoPoint[], traveledM: number): { done: GeoPoint[]; left: GeoPoint[] } {
+  if (line.length < 2) return { done: [...line], left: [...line] };
+  const target = Math.max(0, traveledM);
+  let cursor = 0;
+  for (let i = 1; i < line.length; i++) {
+    const seg = haversine(line[i - 1], line[i]);
+    const reach = cursor + seg;
+    if (target <= reach || i === line.length - 1) {
+      const t = seg <= 0 ? 1 : Math.max(0, Math.min(1, (target - cursor) / seg));
+      const mid = {
+        lat: line[i - 1].lat + (line[i].lat - line[i - 1].lat) * t,
+        lng: line[i - 1].lng + (line[i].lng - line[i - 1].lng) * t,
+      };
+      const done = [...line.slice(0, i), mid];
+      const left = [mid, ...line.slice(i)];
+      return {
+        done: done.length >= 2 ? done : [line[0], mid],
+        left: left.length >= 2 ? left : [mid, line[line.length - 1]],
+      };
+    }
+    cursor = reach;
+  }
+  return { done: [...line], left: line.slice(-2) };
+}
+
+/** Distance, action, and road, split so the distance can be read first. */
+export function guidanceFace(text: string): { action: string; road: string; lane: string } {
+  const laneAt = text.search(/\s+Use the lane marked /);
+  const lane = laneAt >= 0 ? text.slice(laneAt).trim().replace(/\.$/, "") : "";
+  const body = (laneAt >= 0 ? text.slice(0, laneAt) : text).replace(/\.$/, "").trim();
+  const onto = body.match(/^(.*?) onto (.+)$/);
+  if (onto) return { action: onto[1], road: onto[2], lane };
+  const named = body.match(/^(Continue|Head|Exit|Arrive) (?:on|at) (.+)$/);
+  if (named) return { action: named[1] === "Arrive" ? "Arrive" : named[1], road: named[2], lane };
+  return { action: body || "Continue", road: "", lane };
+}
+
+/** How another returned route differs from the recommended one. Both figures are the provider's estimate. */
+export function routeDelta(route: { durationS: number; distanceM: number }, recommended: { durationS: number; distanceM: number }): string {
+  const minutes = Math.round((route.durationS - recommended.durationS) / 60);
+  const metres = route.distanceM - recommended.distanceM;
+  const time = minutes === 0 ? "Same estimated time" : minutes > 0 ? `${minutes} min longer` : `${Math.abs(minutes)} min shorter`;
+  const distance = Math.abs(metres) < 50 ? "about the same distance" : metres > 0 ? `${formatDistance(metres)} longer` : `${formatDistance(Math.abs(metres))} shorter`;
+  return `${time} · ${distance}`;
+}
+
 export interface MapProvider {
   id: string;
   label: string;
@@ -975,7 +1174,7 @@ export interface MapProvider {
   searchPlaces(query: string): Promise<PlaceHit[]>;
   geocode(query: string): Promise<PlaceHit | null>;
   reverseGeocode(point: GeoPoint): Promise<string | null>;
-  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode): Promise<RouteOption[]>;
+  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode, via?: GeoPoint | null): Promise<RouteOption[]>;
   getRouteAlternatives(from: GeoPoint, to: GeoPoint, mode: TravelMode): Promise<RouteOption[]>;
   getCurrentLocation(): Promise<{ available: false; note: string }>;
   startNavigation(): void;

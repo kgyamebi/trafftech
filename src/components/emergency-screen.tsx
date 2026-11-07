@@ -1,3 +1,4 @@
+import { callablePhone } from "@/domain/catalogue";
 import { Listen } from "./listen";
 import { EmergencyForm } from "./forms";
 import type { Workspace } from "@/domain/types";
@@ -36,6 +37,11 @@ export function EmergencyScreen({ ws }: { ws: Workspace }) {
           <dd>{card.medicalNote || "Not entered"}</dd>
         </div>
       </dl>
+      {callablePhone(card.contactPhone) ? (
+        <a className="btn w-fit" href={`tel:${callablePhone(card.contactPhone)}`}>Call {card.contactName || "your emergency contact"}</a>
+      ) : (
+        <p className="text-sm">Save a phone number on this card before a call can be placed. This does not call a hospital or the police.</p>
+      )}
       <Listen text={speech} label="Listen" />
       <p className="text-sm text-muted">After you open this card, a copy stays on this phone so the driving screen can show it. The map itself is not stored for offline use.</p>
       <EmergencyForm locked={ws.mode === "demo"} values={card} />
@@ -44,13 +50,13 @@ export function EmergencyScreen({ ws }: { ws: Workspace }) {
 }
 
 function Phone({ label, name, phone }: { label: string; name: string; phone: string }) {
-  const callable = phone.replace(/[^\d+]/g, "");
+  const callable = callablePhone(phone);
   return (
     <div>
       <dt className="text-sm text-muted">{label}</dt>
       <dd className="text-2xl">
         {name || "None saved"}
-        {callable ? <> · <a className="underline" href={`tel:${callable}`}>{phone}</a></> : null}
+        {callable ? <> · <a className="underline" href={`tel:${callable}`}>{phone}</a></> : phone ? <> · {phone}</> : null}
       </dd>
     </div>
   );

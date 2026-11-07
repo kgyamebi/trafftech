@@ -1,18 +1,22 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { Briefcase, Gauge, GraduationCap, House, Layers, LocateFixed, Mic, Minus, Pause, Plus, Search, Square, Star, X } from "lucide-react";
+import { Briefcase, Gauge, GraduationCap, House, Layers, LocateFixed, Mic, Minus, Pause, Plus, Ruler, Search, Square, Star, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DrivePrefs } from "@/domain/drive-prefs";
+import { estimateShare, fuelEstimate, NEARBY, tripShare, type MapMark } from "@/domain/catalogue";
 import { driverHealth, driverStatusChip, oneUpcoming, openingCard } from "@/domain/intelligence";
-import { filterTrips, formatDistance, formatDuration, bearingDeg, haversine, type TravelMode } from "@/domain/navigation";
+import { mapDesk } from "@/domain/map-desk";
+import { callablePhone } from "@/domain/catalogue";
+import { filterTrips, formatDistance, formatDuration, bearingDeg, guidanceFace, haversine, routeDelta, shapeMeasure, shortestRouteId, similarDriveNote, turnList, type GeoPoint, type TravelMode } from "@/domain/navigation";
 import type { PlaceView, Workspace } from "@/domain/types";
 import { exitDemoAction } from "@/server/actions";
 import { DrivingScreen } from "./driving-screen";
 import { MapCanvas, type MapHandle } from "./nav/map-canvas";
 import { SchematicMap } from "./nav/schematic";
 import { useDrive } from "./nav/use-drive";
+import { useVehicleLook, VehicleGlyph, VehiclePicker } from "./vehicle-picker";
 
 const VIEWS = [
   { id: "close", label: "Close", zoom: 18, ahead: 90 },
@@ -48,17 +52,6 @@ const LIBRARY = [
   { href: "/profile", label: "Profile" },
 ];
 
-const NEARBY = [
-  ["Hospital", "hospital"],
-  ["Pharmacy", "pharmacy"],
-  ["Fuel", "fuel station"],
-  ["Police", "police"],
-  ["School", "school"],
-  ["Market", "market"],
-  ["Bank", "bank"],
-  ["Restaurant", "restaurant"],
-] as const;
-
 const SEARCH_SHORTCUTS = [
   ["Airports", "airport"],
   ["Hospitals", "hospital"],
@@ -66,18 +59,47 @@ const SEARCH_SHORTCUTS = [
   ["Universities", "university"],
   ["Restaurants", "restaurant"],
   ["Landmarks", "landmark"],
-  ["Businesses", "shop"],
+  ["Trotro", "trotro"],
+  ["Church", "church"],
 ] as const;
 
-export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; prefs: DrivePrefs; screen?: "map" | "now" }) {
-  const nav = useDrive(ws, prefs.voice);
+export function DriveScreen({ ws, prefs, marks = [], screen = "map" }: { ws: Workspace; prefs: DrivePrefs; marks?: MapMark[]; screen?: "map" | "now" }) {
+  const nav = useDrive(ws, prefs.voice, marks);
+  const [showKnown, setShowKnown] = useState(true);
+  const [showReports, setShowReports] = useState(true);
+  const [fuelUse, setFuelUse] = useState({ litres: "", price: "" });
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("nokware-fuel-use") || "null") as { litres?: string; price?: string } | null;
+      if (saved) setFuelUse({ litres: saved.litres ?? "", price: saved.price ?? "" });
+    } catch {
+      /* private mode */
+    }
+  }, []);
+  const look = useVehicleLook(prefs.role);
+  const mark = look.mark(nav.travelMode);
   const reduce = useReducedMotion();
   const mapRef = useRef<MapHandle>(null);
   const [view, setView] = useState<MapViewId>("street");
+  const [measureOn, setMeasureOn] = useState(false);
+  const [measureArea, setMeasureArea] = useState(false);
+  const [measurePts, setMeasurePts] = useState<GeoPoint[]>([]);
+  const [deskOpen, setDeskOpen] = useState(false);
+  const [vehicleOpen, setVehicleOpen] = useState(false);
   const [camera, setCamera] = useState({ zoom: 16, ahead: 0, token: 0, fit: false });
   const moving = (nav.speed ?? 0) > 8 || nav.demoOn;
   const chosen = VIEWS.find((item) => item.id === view) ?? VIEWS[1];
-  const ahead = chosen.ahead > 0 && moving ? chosen.ahead : 0;
+  const guiding = nav.phase === "navigating" || nav.phase === "recalculating";
+  const ahead = guiding && (view === "close" || view === "street")
+    ? (view === "close" ? 110 : 170)
+    : chosen.ahead > 0 && moving ? chosen.ahead : 0;
+  const quick = [
+    ...(["home", "work", "school"] as const).flatMap((slot) => {
+      const saved = nav.ws.places.find((place) => place.slot === slot);
+      return saved ? [{ id: saved.id, name: saved.name, address: saved.address, lat: saved.lat, lng: saved.lng, label: slot }] : [];
+    }),
+    ...nav.recents.slice(0, 3).map((place) => ({ ...place, label: place.name })),
+  ].slice(0, 3);
   const tone = "bg-paper text-ink";
   const quiet = "text-muted";
   const browsing = nav.phase === "browse" || nav.phase === "preview";
@@ -103,6 +125,17 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
     demo: nav.ws.mode === "demo",
   });
 
+  const phaseWas = useRef(nav.phase);
+  useEffect(() => {
+    const previous = phaseWas.current;
+    phaseWas.current = nav.phase;
+    if (nav.phase === "navigating" && (previous === "preview" || previous === "browse")) {
+      setView("street");
+      setCamera((current) => ({ zoom: 16, ahead: 0, token: current.token + 1, fit: false }));
+      nav.setFollow(true);
+    }
+  }, [nav.phase, nav.setFollow]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") nav.setSearchOpen(false);
@@ -119,13 +152,13 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
     if (id === "close" || id === "street") nav.setFollow(true);
   }
 
-  if (screen === "now") return <DrivingScreen nav={nav} prefs={prefs} />;
+  if (screen === "now") return <DrivingScreen nav={nav} prefs={prefs} look={look} />;
 
   return (
     <div className="drive-root">
       <div className="drive-stage">
         {nav.mapFailed ? (
-          <SchematicMap night={nav.night} lines={nav.lines} puck={nav.puck} />
+          <SchematicMap night={nav.night} lines={nav.lines} puck={nav.puck} mark={mark} />
         ) : (
           <MapCanvas
             key={nav.mapKey}
@@ -139,11 +172,33 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
             follow={nav.follow && (nav.phase === "navigating" || nav.phase === "recalculating")}
             fitToken={nav.fitToken}
             puck={nav.puck}
+            mark={mark}
             lines={nav.lines}
-            places={nav.showPlaces ? nav.ws.places.map((place) => ({ id: place.id, name: place.name, lat: place.lat, lng: place.lng })) : []}
+            places={[
+              ...(nav.showPlaces ? nav.ws.places.map((place) => ({ id: place.id, name: place.name, lat: place.lat, lng: place.lng })) : []),
+              ...(showKnown ? marks.filter((mark) => mark.kind === "place").map((mark) => ({ id: mark.id, name: mark.name, lat: mark.lat, lng: mark.lng })) : []),
+              ...(showReports ? marks.filter((mark) => mark.kind === "report").map((mark) => ({ id: mark.id, name: mark.name, lat: mark.lat, lng: mark.lng })) : []),
+            ]}
+            sketch={measureOn ? measurePts : []}
+            sketchClosed={measureArea}
             pin={nav.pin}
-            onPick={(point) => void nav.pickPoint(point)}
-            onPlace={nav.pickSaved}
+            end={nav.phase === "navigating" || nav.phase === "recalculating" ? nav.destination : null}
+            turn={nav.turn}
+            onPick={(point) => {
+              if (measureOn) {
+                setMeasurePts((points) => [...points, point].slice(-8));
+                return;
+              }
+              void nav.pickPoint(point);
+            }}
+            onPlace={(id) => {
+              const mark = marks.find((item) => item.id === id);
+              if (mark) {
+                void nav.pickPoint({ lat: mark.lat, lng: mark.lng }, { name: mark.name, address: mark.detail, keepName: true });
+                return;
+              }
+              nav.pickSaved(id);
+            }}
             onUserMove={() => nav.setFollow(false)}
             onFail={nav.failMap}
           />
@@ -161,15 +216,21 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
           </div>
         ) : null}
 
-        {nav.phase === "navigating" || nav.phase === "recalculating" ? (
-          <div className={`absolute left-3 right-16 top-3 z-20 rounded-[16px] px-4 py-4 ${tone} sm:right-24`}>
-            <p className="numeric text-5xl sm:text-6xl">{nav.instruction?.text ?? "Continue"}</p>
-            <p className={`mt-2 text-lg ${quiet}`}>{nav.instruction ? formatDistance(nav.instruction.metres) : ""}</p>
-            {nav.frame?.narration ? <p className={`mt-2 text-sm ${quiet}`}>{nav.frame.narration}</p> : null}
+        {nav.phase === "browse" && !nav.searchOpen && quick.length ? (
+          <div className="absolute left-3 right-16 top-[4.4rem] z-20 flex gap-2 overflow-x-auto" aria-label="Go again">
+            {quick.map((place) => (
+              <button key={place.id} type="button" className={`max-w-[11rem] shrink-0 truncate rounded-full px-3 py-2 text-sm font-semibold shadow-soft ${tone}`} onClick={() => void nav.choose(place)}>
+                {place.label}
+              </button>
+            ))}
           </div>
         ) : null}
 
-        {nav.banner ? <p className={`absolute left-3 right-3 top-36 z-20 rounded-[12px] px-3 py-2 text-sm ${tone}`}>{nav.banner}</p> : null}
+        {nav.phase === "navigating" || nav.phase === "recalculating" ? (
+          <GuideBanner nav={nav} tone={tone} quiet={quiet} />
+        ) : null}
+
+        {nav.banner && nav.phase !== "navigating" && nav.phase !== "recalculating" ? <p className={`absolute left-3 right-3 top-36 z-20 rounded-[12px] px-3 py-2 text-sm ${tone}`}>{nav.banner}</p> : null}
         {nav.where && nav.where.startsWith("GPS") ? <p className={`absolute left-3 right-3 z-20 rounded-[12px] px-3 py-2 text-sm ${tone} ${nav.phase === "navigating" ? "top-52" : "top-48"}`}>{nav.where}</p> : null}
         {!nav.online ? (
           <p className={`absolute left-3 right-3 z-20 rounded-[12px] px-3 py-2 text-sm ${tone} bottom-36`}>
@@ -178,8 +239,8 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
           </p>
         ) : null}
 
-        {nav.mapFailed ? null : (
-          <div className={`absolute left-3 z-20 flex gap-1 ${browsing ? "top-24" : "top-44"}`} aria-label="Map view">
+        {nav.mapFailed || !browsing ? null : (
+          <div className={`absolute left-3 z-20 flex gap-1 ${nav.phase === "browse" && quick.length ? "top-36" : "top-24"}`} aria-label="Map view">
             {VIEWS.map((item) => (
               <button
                 key={item.id}
@@ -194,7 +255,7 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
           </div>
         )}
 
-        <div className={`absolute right-3 z-20 grid gap-2 ${browsing ? "top-24" : "top-44"}`}>
+        <div className={`absolute right-3 z-20 grid gap-2 ${browsing ? "top-24" : "top-64"}`}>
           {!nav.follow ? (
             <IconButton label="Recenter" onClick={() => nav.setFollow(true)} night={nav.night}><LocateFixed size={18} /></IconButton>
           ) : null}
@@ -204,23 +265,88 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
               <IconButton label="Zoom out" onClick={() => mapRef.current?.zoomOut()} night={nav.night}><Minus size={18} /></IconButton>
             </>
           )}
+          {browsing ? <IconButton label={measureOn ? "Stop measuring" : "Measure"} onClick={() => { setMeasureOn((on) => !on); setMeasurePts([]); }} night={nav.night}><Ruler size={18} /></IconButton> : null}
           <IconButton label="Map layers" onClick={() => nav.setLayersOpen(!nav.layersOpen)} night={nav.night}><Layers size={18} /></IconButton>
+          {browsing ? <IconButton label={`Vehicle, ${mark.label}`} onClick={() => setVehicleOpen((open) => !open)} night={nav.night}><VehicleGlyph mark={mark} bearing={nav.bearing} demo={false} size={20} /></IconButton> : null}
         </div>
 
         {nav.layersOpen ? (
           <div className={`absolute right-16 top-40 z-20 w-52 rounded-[14px] p-3 text-sm ${tone}`}>
             <p className="eyebrow">Layers</p>
+            <div className="mt-3 flex flex-wrap gap-1" aria-label="Map view">
+              {VIEWS.map((item) => (
+                <button key={item.id} type="button" aria-pressed={view === item.id} className={`h-8 rounded-full px-2 text-xs font-semibold ${view === item.id ? "bg-ink text-paper" : "border border-current/20"}`} onClick={() => chooseView(item.id)}>{item.label}</button>
+              ))}
+            </div>
             <label className="mt-3 flex items-center justify-between gap-3">
               Saved places
               <input type="checkbox" checked={nav.showPlaces} onChange={(event) => nav.setShowPlaces(event.target.checked)} />
             </label>
-            <p className={`mt-3 ${quiet}`}>Traffic is not connected, so that layer stays off.</p>
+            <label className="mt-3 flex items-center justify-between gap-3">
+              Confirmed places
+              <input type="checkbox" checked={showKnown} onChange={(event) => setShowKnown(event.target.checked)} />
+            </label>
+            <label className="mt-3 flex items-center justify-between gap-3">
+              Confirmed reports
+              <input type="checkbox" checked={showReports} onChange={(event) => setShowReports(event.target.checked)} />
+            </label>
+            <p className={`mt-3 ${quiet}`}>Traffic, satellite, terrain and transit colours are not connected, so those layers stay off.</p>
+            <button type="button" className="mt-3 underline" onClick={() => { nav.setLayersOpen(false); setDeskOpen(true); }}>What this map does</button>
+          </div>
+        ) : null}
+
+        {vehicleOpen ? (
+          <div className={`absolute left-3 right-16 top-24 z-30 max-h-[52vh] overflow-y-auto rounded-[16px] p-4 ${tone}`}>
+            <div className="flex items-start justify-between gap-3">
+              <p className="eyebrow">On the map</p>
+              <button type="button" className="text-sm underline" onClick={() => setVehicleOpen(false)}>Done</button>
+            </div>
+            <div className="mt-3">
+              <VehiclePicker mode={nav.travelMode} look={look} />
+            </div>
+          </div>
+        ) : null}
+
+        {measureOn ? (
+            <MeasureCard
+            area={measureArea}
+            points={measurePts}
+            tone={tone}
+            quiet={quiet}
+            onArea={(next) => { setMeasureArea(next); setMeasurePts([]); }}
+            onUndo={() => setMeasurePts((points) => points.slice(0, -1))}
+            onDone={() => { setMeasureOn(false); setMeasurePts([]); }}
+          />
+        ) : null}
+
+        {deskOpen ? (
+          <div className={`absolute bottom-24 left-3 right-16 top-28 z-30 overflow-y-auto rounded-[16px] p-4 ${tone}`}>
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="display text-3xl">What this map does</h2>
+              <button type="button" aria-label="Close map details" onClick={() => setDeskOpen(false)}><X size={18} /></button>
+            </div>
+            <p className={`mt-2 text-sm ${quiet}`}>A line is available only when a source is actually connected.</p>
+            {Array.from(new Set(mapDesk().map((item) => item.group))).map((group) => (
+              <section key={group} className="mt-4">
+                <h3 className="text-sm font-semibold">{group}</h3>
+                <ul className="mt-2 grid gap-2">
+                  {mapDesk().filter((item) => item.group === group).map((item) => (
+                    <li key={item.name} className="text-sm">
+                      <span className="opacity-60">{item.state === "available" ? "Available" : item.state === "partial" ? "Partial" : "Not connected"}.</span> {item.name}. {item.detail}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
           </div>
         ) : null}
 
         {nav.phase === "preview" ? (
           <div className="drive-route">
-            <RouteCard nav={nav} chip={chip} />
+            <RouteCard nav={nav} chip={chip} fuelUse={fuelUse} onFuel={(next) => {
+              setFuelUse(next);
+              try { localStorage.setItem("nokware-fuel-use", JSON.stringify(next)); } catch { /* private mode */ }
+            }} />
           </div>
         ) : null}
 
@@ -293,7 +419,7 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
         {nav.phase !== "preview" && nav.phase !== "summary" && !(nav.pin && nav.phase === "browse") ? (
           <motion.section
             className={`drive-sheet ${tone}`}
-            animate={{ height: nav.sheet === "collapsed" ? (browsing ? (card.checks ? 300 : 228) : 120) : nav.sheet === "half" ? "42%" : "78%" }}
+            animate={{ height: nav.sheet === "collapsed" ? (browsing ? 132 : 64) : nav.sheet === "half" ? "42%" : "78%" }}
             transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 320, damping: 34 }}
             drag="y"
             dragConstraints={{ top: 0, bottom: 0 }}
@@ -311,6 +437,53 @@ export function DriveScreen({ ws, prefs, screen = "map" }: { ws: Workspace; pref
         ) : null}
       </div>
     </div>
+  );
+}
+
+function GuideBanner({ nav, tone, quiet }: { nav: ReturnType<typeof useDrive>; tone: string; quiet: string }) {
+  const face = guidanceFace(nav.instruction?.text ?? "Continue");
+  const metres = nav.instruction?.metres ?? null;
+  return (
+    <div className={`absolute left-3 right-16 top-3 z-20 rounded-[16px] px-4 py-3 ${tone}`}>
+      <div className="flex items-start gap-3">
+        <ManeuverMark action={face.action} />
+        <div className="min-w-0 flex-1">
+          <p className="numeric text-5xl leading-none sm:text-6xl">{metres == null ? "—" : formatDistance(metres)}</p>
+          <p className="mt-2 truncate text-xl leading-tight">{face.action}{face.road ? ` · ${face.road}` : ""}</p>
+          {face.lane ? <p className={`mt-1 text-sm ${quiet}`}>{face.lane}.</p> : null}
+          {nav.instruction && nav.thenCue && metres != null && nav.thenCue.metres - metres <= 400 ? <p className={`mt-1 truncate text-sm ${quiet}`}>Then {nav.thenCue.text}</p> : null}
+        </div>
+        <div className="shrink-0 text-right">
+          <p className={`numeric text-4xl leading-none ${statusColor(nav.status)}`}><SpeedFigure value={nav.speed} /></p>
+          <p className={`mt-1 text-xs ${quiet}`}>{nav.limit.kph == null ? "Limit —" : `Limit ${nav.limit.kph}`}</p>
+        </div>
+      </div>
+      <p className={`mt-3 text-sm ${quiet}`}>
+        {nav.phase === "recalculating" ? "Recalculating. " : ""}
+        {nav.etaMin != null ? formatDuration(nav.etaMin) : ""}
+        {nav.progress ? ` · ${formatDistance(nav.progress.remainingM)} left` : ""}
+        {nav.etaLabel ? ` · ${nav.etaLabel}` : ""}
+        {nav.headingKnown ? ` · ${compass(nav.bearing)}` : " · Heading is not available yet"}
+        {" · North stays up."}
+      </p>
+      {nav.frame?.narration ? <p className={`mt-1 text-sm ${quiet}`}>{nav.frame.narration}</p> : null}
+      {nav.selected?.warnings?.[0] ? <p className="mt-1 text-sm">{nav.selected.warnings[0]}</p> : null}
+    </div>
+  );
+}
+
+function ManeuverMark({ action }: { action: string }) {
+  const lower = action.toLowerCase();
+  const turn = lower.includes("u-turn") ? 180 : lower.includes("left") ? -90 : lower.includes("right") ? 90 : 0;
+  const arrive = lower.startsWith("arrive");
+  return (
+    <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-ink text-paper" aria-hidden>
+      {arrive ? <span className="h-3 w-3 rounded-full bg-current" /> : (
+        <svg width="22" height="22" viewBox="0 0 22 22" style={{ transform: `rotate(${turn}deg)` }}>
+          <path d="M11 3 L11 18 M11 3 L6 8 M11 3 L16 8" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+        </svg>
+      )}
+    </span>
   );
 }
 
@@ -340,11 +513,12 @@ function PinCard({ nav, onLook }: { nav: ReturnType<typeof useDrive>; onLook: ()
         <p className="mt-1 text-sm opacity-60">Distance appears when this phone has a GPS fix.</p>
       )}
       {place?.limitKph != null ? <p className="mt-2 text-sm">Mapped limit {place.limitKph}. The posted sign controls.</p> : null}
-      {place?.hours ? <p className="mt-2 text-sm">Mapped hours: {place.hours}. This is not a live open or closed status.</p> : null}
-      {place?.phone ? <a className="mt-2 block text-sm underline" href={`tel:${place.phone.replace(/[^\d+]/g, "")}`}>Call {place.phone}</a> : null}
+      {place?.hours ? <p className="mt-2 text-sm">{place.hoursSource === "USER_PROVIDED" ? "Hours entered by a driver" : "Mapped hours"}: {place.hours}. This is not a live open or closed status.</p> : null}
+      {place?.phone ? (callablePhone(place.phone) ? <a className="mt-2 block text-sm underline" href={`tel:${callablePhone(place.phone)}`}>{place.hoursSource === "USER_PROVIDED" ? "Phone entered by a driver" : "Call"} {place.phone}</a> : <p className="mt-2 text-sm">{place.hoursSource === "USER_PROVIDED" ? "Phone entered by a driver" : "Mapped phone"}: {place.phone}</p>) : null}
       {place?.website ? <a className="mt-1 block truncate text-sm underline" href={place.website} target="_blank" rel="noreferrer">Mapped website</a> : null}
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" className="drive-action" onClick={nav.directionsToPin}>Directions</button>
+        {nav.destination ? <button type="button" className="drive-quiet" onClick={() => void nav.addStop()}>Add as stop</button> : null}
         <button type="button" className="drive-quiet" onClick={() => void nav.departFromPin()}>From here</button>
         <button type="button" className="drive-quiet" onClick={() => void nav.sharePin()}>Share</button>
         <button type="button" className="drive-quiet" aria-expanded={saving} onClick={() => setSaving((open) => !open)}>Save</button>
@@ -362,22 +536,46 @@ function PinCard({ nav, onLook }: { nav: ReturnType<typeof useDrive>; onLook: ()
       {nav.pinNote ? <p className="mt-2 text-sm">{nav.pinNote}</p> : null}
       <p className="eyebrow mt-4 opacity-60">Nearby</p>
       <div className="mt-2 flex flex-wrap gap-2">
-        {NEARBY.map(([label, query]) => (
-          <button key={query} type="button" className="rounded-full border border-current/15 px-3 py-1 text-sm" onClick={() => void nav.findNearby(query)}>{label}</button>
+        {NEARBY.map((item) => (
+          <button key={item.query} type="button" className="rounded-full border border-current/15 px-3 py-1 text-sm" onClick={() => void nav.findNearby(item.query)}>{item.label}</button>
         ))}
       </div>
       {nav.nearbyBusy ? <p className="mt-2 text-sm opacity-60">Searching OpenStreetMap nearby…</p> : null}
       <ul className="mt-2 grid gap-1">
         {nav.nearby.map((hit) => (
           <li key={hit.id}>
-            <button type="button" className="block w-full rounded-[12px] px-2 py-2 text-left hover:bg-black/5" onClick={() => void nav.pickPoint({ lat: hit.lat, lng: hit.lng }, { name: hit.name, address: hit.address })}>
+            <button type="button" className="block w-full rounded-[12px] px-2 py-2 text-left hover:bg-black/5" onClick={() => void nav.pickPoint({ lat: hit.lat, lng: hit.lng }, { name: hit.name, address: hit.address, phone: hit.phone, hours: hit.hours, keepName: hit.source === "USER_PROVIDED" })}>
               <span className="block">{hit.name}</span>
-              <span className="block text-sm opacity-60">{hit.distanceM != null ? `${formatDistance(hit.distanceM)} · OpenStreetMap` : hit.address}</span>
+              <span className="block text-sm opacity-60">{hit.distanceM != null ? `${formatDistance(hit.distanceM)} · ` : ""}{hit.source === "USER_PROVIDED" ? "Confirmed by drivers" : "OpenStreetMap"}{hit.priceNote ? `. ${hit.priceNote}` : ""}</span>
             </button>
           </li>
         ))}
       </ul>
-      <p className="mt-3 text-xs opacity-60">A name, phone, website, hours or speed appears only when OpenStreetMap has it. Nothing here is guessed.</p>
+      <p className="mt-3 text-xs opacity-60">A phone or hours on a place added by a driver is what that driver entered. OpenStreetMap fields appear only when the map has them. Nothing is guessed, and hours are not a live open or closed status.</p>
+    </div>
+  );
+}
+
+function MeasureCard({ area, points, tone, quiet, onArea, onUndo, onDone }: { area: boolean; points: GeoPoint[]; tone: string; quiet: string; onArea: (area: boolean) => void; onUndo: () => void; onDone: () => void }) {
+  const shape = shapeMeasure(points, area);
+  return (
+    <div className={`absolute bottom-36 left-3 right-16 z-30 rounded-[16px] p-4 ${tone}`}>
+      <p className="eyebrow">Measure</p>
+      <div className="mt-2 flex gap-3 text-sm">
+        <button type="button" aria-pressed={!area} className="underline" onClick={() => onArea(false)}>Line</button>
+        <button type="button" aria-pressed={area} className="underline" onClick={() => onArea(true)}>Shape</button>
+      </div>
+      {points.length < (area ? 3 : 2) ? (
+        <p className="mt-2 text-sm">{area ? "Tap each corner. Three corners give an area." : points.length === 0 ? "Tap the first point." : "Tap the next point."}</p>
+      ) : shape ? (
+        <p className="mt-2 text-lg">{formatDistance(shape.perimeterM)}{area && shape.areaM2 != null ? ` · ${shape.areaM2.toLocaleString("en-GH")} m²` : ""}</p>
+      ) : null}
+      {points.length === 8 ? <p className="mt-1 text-sm">Eight points is the longest measure. Undo a point to change a corner.</p> : null}
+      <p className={`mt-1 text-xs ${quiet}`}>A line between the points you tap, or a closed shape. Not a driving route.</p>
+      <div className="mt-3 flex gap-4 text-sm">
+        <button type="button" className="underline" onClick={onUndo} disabled={points.length === 0}>Undo last point</button>
+        <button type="button" className="underline" onClick={onDone}>Done</button>
+      </div>
     </div>
   );
 }
@@ -457,14 +655,10 @@ function SheetBody({
   if (nav.sheet === "collapsed") {
     if (!driving) return <ReadyCard card={card} onExpand={() => nav.setSheet("half")} />;
     return (
-      <button type="button" className="mt-2 w-full text-left" onClick={() => nav.setSheet("half")}>
-        <span className="numeric text-4xl"><SpeedFigure value={nav.speed} /></span>
-        <span className="mt-1 block text-sm opacity-70">
-          km/h · {nav.limit.kph == null ? "Limit unavailable" : `Limit ${nav.limit.kph}`}
-          {nav.etaMin != null ? ` · ${formatDuration(nav.etaMin)}` : ""}
-          {nav.etaLabel ? ` · ETA ${nav.etaLabel}` : ""}
-        </span>
-      </button>
+      <div className="mt-1 flex gap-2">
+        <button type="button" className="drive-quiet" onClick={() => nav.setPaused(!nav.paused)}><Pause size={14} /> {nav.paused ? "Resume" : "Pause"}</button>
+        <button type="button" className="drive-action" onClick={nav.finish}><Square size={14} /> End</button>
+      </div>
     );
   }
   return (
@@ -493,23 +687,11 @@ function SheetBody({
 
 function ReadyCard({ card, onExpand }: { card: ReturnType<typeof openingCard>; onExpand: () => void }) {
   return (
-    <div className="mt-1">
-      <button type="button" className="w-full text-left" onClick={onExpand}>
-        <p className="text-[13px] tracking-[0.14em]">{card.label}</p>
-        <p className="mt-2 text-xl leading-snug">{card.message}</p>
-      </button>
-      {card.checks ? (
-        <ul className="mt-3 grid gap-1 text-sm">
-          {card.checks.map((check) => (
-            <li key={check.label}>✓ {check.label}</li>
-          ))}
-        </ul>
-      ) : (
-        <Link href={card.href} className="mt-3 inline-flex min-h-11 items-center text-sm underline">{card.action}</Link>
-      )}
-      {card.score != null ? <p className="mt-3 text-sm">Driver score {card.score}</p> : null}
-      {card.demo ? <p className="mt-2 text-xs text-muted">DEMO. Not your records.</p> : null}
-    </div>
+    <button type="button" className="mt-1 w-full text-left" onClick={onExpand}>
+      <p className="text-[13px] tracking-[0.14em]">{card.label}</p>
+      <p className="mt-1 truncate text-lg leading-snug">{card.message}</p>
+      {card.demo ? <p className="mt-1 text-xs text-muted">DEMO. Not your records.</p> : null}
+    </button>
   );
 }
 
@@ -648,6 +830,7 @@ function Settings({ nav }: { nav: ReturnType<typeof useDrive> }) {
           ))}
         </div>
       )}
+      <p className="text-xs opacity-60">Motorcycle, scooter and public transport routing are not connected.</p>
     </div>
   );
 }
@@ -711,9 +894,23 @@ function History({ nav, paper = false }: { nav: ReturnType<typeof useDrive>; pap
         {trips.map((trip) => (
           <li key={trip.id} className="text-sm">
             <p>{trip.originLabel ?? trip.roadContext} → {trip.destinationLabel ?? "Recorded drive"}</p>
-            <p className="opacity-60">{trip.endedAt.slice(0, 10)} · {formatDistance(trip.distanceM ?? 0)} · {trip.minutes} min{trip.speedCompliance != null ? ` · ${trip.speedCompliance}%` : ""}</p>
+            <p className="opacity-60">{trip.endedAt.slice(0, 10)} · {trip.distanceM == null ? "Distance not saved" : formatDistance(trip.distanceM)} · {trip.minutes} min · {trip.harshBrakes} harsh brake{trip.harshBrakes === 1 ? "" : "s"} · {trip.harshAccelerations} harsh acceleration{trip.harshAccelerations === 1 ? "" : "s"}{trip.speedCompliance != null ? ` · ${trip.speedCompliance}%` : ""}</p>
             {trip.notes.slice(0, 2).map((note) => <p key={note} className="opacity-60">{note}</p>)}
-            {nav.ws.mode === "user" ? <button type="button" className="mt-1 underline" onClick={() => nav.removeTrip(trip.id)}>Remove</button> : null}
+            <div className="mt-1 flex gap-3">
+              <button type="button" className="underline" onClick={() => {
+                const text = tripShare({
+                  origin: trip.originLabel ?? trip.roadContext,
+                  destination: trip.destinationLabel ?? "Recorded drive",
+                  when: trip.endedAt.slice(0, 10),
+                  distance: formatDistance(trip.distanceM ?? 0),
+                  minutes: trip.minutes,
+                  compliance: trip.speedCompliance,
+                });
+                if (navigator.share) void navigator.share({ text }).catch(() => undefined);
+                else void navigator.clipboard?.writeText(text);
+              }}>Share</button>
+              {nav.ws.mode === "user" ? <button type="button" className="underline" onClick={() => nav.removeTrip(trip.id)}>Remove</button> : null}
+            </div>
           </li>
         ))}
       </ul>
@@ -753,23 +950,30 @@ function SearchBody({ nav, paper, autoFocus = false }: { nav: ReturnType<typeof 
       </ul>
       {nav.query.trim().length < 2 ? (
         <>
-          <div className="mt-4 flex flex-wrap gap-2">
+          <ul className="mt-4 grid gap-1">
+            {(["home", "work", "school"] as const).map((slot) => {
+              const saved = nav.ws.places.find((place) => place.slot === slot);
+              if (!saved) return null;
+              const Icon = slot === "home" ? House : slot === "work" ? Briefcase : GraduationCap;
+              return (
+                <li key={slot}>
+                  <button type="button" className="flex w-full items-center gap-3 rounded-[12px] px-2 py-3 text-left hover:bg-black/5" onClick={() => nav.choose(saved)}>
+                    <Icon size={16} />
+                    <span className="min-w-0">
+                      <span className="block capitalize">{slot}</span>
+                      <span className="block truncate text-sm opacity-60">{saved.name}</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="mt-3 flex flex-wrap gap-2">
             {SEARCH_SHORTCUTS.map(([label, query]) => (
               <button key={label} type="button" className="rounded-full border border-current/15 px-3 py-1 text-sm" onClick={() => nav.setQuery(query)}>
                 {label}
               </button>
             ))}
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {(["home", "work", "school"] as const).map((slot) => {
-              const saved = nav.ws.places.find((place) => place.slot === slot);
-              if (!saved) return null;
-              return (
-                <button key={slot} type="button" className="rounded-full border border-current/15 px-3 py-1 text-sm capitalize" onClick={() => nav.choose(saved)}>
-                  {slot} · {saved.name}
-                </button>
-              );
-            })}
           </div>
           <p className="eyebrow mt-5 opacity-60">Recent</p>
           <ul className="mt-2 grid gap-2">
@@ -791,36 +995,111 @@ function SearchBody({ nav, paper, autoFocus = false }: { nav: ReturnType<typeof 
   );
 }
 
-function RouteCard({ nav, chip }: { nav: ReturnType<typeof useDrive>; chip: ReturnType<typeof driverStatusChip> }) {
+function ShortestOfThese({ nav }: { nav: ReturnType<typeof useDrive> }) {
+  const id = shortestRouteId(nav.routes);
+  const shortest = nav.routes.find((route) => route.id === id);
+  if (!shortest) return null;
+  if (nav.selected?.id === shortest.id) {
+    return <p className="mt-3 text-sm">This is the shortest of these · {formatDistance(shortest.distanceM)}. The list stays ordered by estimated time.</p>;
+  }
+  return (
+    <button type="button" className="mt-3 text-sm underline" onClick={() => nav.selectRoute(shortest.id)}>
+      Shortest of these · {formatDistance(shortest.distanceM)}
+    </button>
+  );
+}
+
+function RouteCard({ nav, chip, fuelUse, onFuel }: { nav: ReturnType<typeof useDrive>; chip: ReturnType<typeof driverStatusChip>; fuelUse: { litres: string; price: string }; onFuel: (next: { litres: string; price: string }) => void }) {
+  const [details, setDetails] = useState(false);
+  const litres = fuelUse.litres.trim() ? Number(fuelUse.litres) : null;
+  const price = fuelUse.price.trim() ? Number(fuelUse.price) : null;
+  const fuel = nav.selected ? fuelEstimate(nav.selected.distanceM, litres, price) : null;
+  const litresBad = Boolean(fuelUse.litres.trim()) && (litres == null || !Number.isFinite(litres) || litres < 2 || litres > 40);
+  const priceBad = Boolean(fuelUse.price.trim()) && (price == null || !Number.isFinite(price) || price < 1 || price > 40);
+  const similar = nav.selected ? similarDriveNote(nav.ws.sessions, nav.selected.distanceM) : null;
+  const turns = nav.selected ? turnList(nav.selected.steps).slice(0, 4) : [];
   return (
     <div className="rounded-[16px] bg-paper p-4 text-ink shadow-soft">
-      <p className="text-2xl">{nav.destination?.name}</p>
+      <p className="text-2xl leading-tight">{nav.destination?.name ?? "Finding a place"}</p>
       <p className="mt-1 text-sm opacity-70">{nav.originIsUser ? nav.originLabel : nav.originPinned ? `From ${nav.originLabel}. Not your GPS.` : "From central Accra, not your location"}</p>
       {nav.selected ? (
-        <p className="mt-3 text-lg">{formatDuration(nav.selected.durationS / 60)} · {formatDistance(nav.selected.distanceM)}</p>
+        <p className="numeric mt-3 text-5xl leading-none">{formatDuration(nav.selected.durationS / 60)}</p>
+      ) : (
+        <p className="mt-3 text-lg">{nav.routeError ? nav.routeError : "Finding a route…"}</p>
+      )}
+      {nav.selected ? <p className="mt-2 text-lg">{formatDistance(nav.selected.distanceM)}</p> : null}
+      {nav.stop ? <p className="mt-2 text-sm">Stop: {nav.stop.name}. The route still ends here. <button type="button" className="underline" onClick={() => void nav.clearStop()}>Remove stop</button></p> : null}
+      {nav.selected?.warnings?.length ? (
+        <ul className="mt-2 grid gap-1 text-sm">
+          {nav.selected.warnings.map((line) => <li key={line}>{line}</li>)}
+        </ul>
       ) : null}
-      <dl className="mt-3 grid gap-2 text-sm">
-        <div className="flex justify-between gap-4"><dt className="opacity-60">Traffic</dt><dd className="text-right">{nav.trafficNote}</dd></div>
-        <div className="flex justify-between gap-4"><dt className="opacity-60">Route quality</dt><dd className="text-right">Not scored. No road-risk feed is connected.</dd></div>
-        <div className="flex justify-between gap-4"><dt className="opacity-60">Speed changes</dt><dd className="text-right">{nav.upcoming ? `Limit ${nav.upcoming.kph} in ${formatDistance(nav.upcoming.metres)}` : "None reported on this route."}</dd></div>
-        <div className="flex justify-between gap-4"><dt className="opacity-60">You</dt><dd className="text-right">{chip.label}. {chip.message}</dd></div>
-      </dl>
-      {nav.routeError ? <p className="mt-3 text-sm">{nav.routeError}</p> : null}
-      <ul className="mt-3 grid gap-2">
-        {nav.routes.map((route) => (
-          <li key={route.id}>
-            <button type="button" aria-pressed={nav.selected?.id === route.id} className="w-full rounded-[12px] border border-current/10 px-3 py-2 text-left" onClick={() => nav.selectRoute(route.id)}>
-              <span className="block text-sm opacity-60">{route.label}</span>
-              <span>{formatDuration(route.durationS / 60)} · {formatDistance(route.distanceM)}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
+      {turns.length ? (
+        <ol className="mt-3 grid gap-1 text-sm">
+          {turns.map((step, index) => (
+            <li key={`${step.text}-${index}`}>{formatDistance(step.metres)} · {step.text}</li>
+          ))}
+        </ol>
+      ) : null}
+      {nav.routes.length > 1 ? (
+        <ul className="mt-3 grid gap-2">
+          {nav.routes.map((route) => (
+            <li key={route.id}>
+              <button type="button" aria-pressed={nav.selected?.id === route.id} className="w-full rounded-[12px] border border-current/10 px-3 py-2 text-left" onClick={() => nav.selectRoute(route.id)}>
+                <span className="block text-sm opacity-60">{route.label}{route.id === shortestRouteId(nav.routes) ? " · Shortest distance" : ""}</span>
+                <span>{formatDuration(route.durationS / 60)} · {formatDistance(route.distanceM)}</span>
+                {route.id !== nav.routes[0].id ? <span className="block text-sm opacity-70">{routeDelta(route, nav.routes[0])}</span> : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="mt-4 flex gap-2">
-        <button type="button" className="drive-action" disabled={!nav.fix || !nav.selected} onClick={nav.start}>Start</button>
+        <button type="button" className="drive-action min-h-12 flex-1 text-base" disabled={!nav.fix || !nav.selected} onClick={nav.start}>Start</button>
         <button type="button" className="drive-quiet" onClick={nav.closePreview}>Cancel</button>
       </div>
       {!nav.fix ? <p className="mt-2 text-xs opacity-70">Location is needed to navigate. You can preview the route, or play the demo drive.</p> : null}
+      <button type="button" className="mt-3 text-sm underline" aria-expanded={details} onClick={() => setDetails((open) => !open)}>{details ? "Hide details" : "Details"}</button>
+      {details ? (
+        <div className="mt-3 grid gap-2 text-sm">
+          <p>{nav.trafficNote}</p>
+          <p>Not scored. No road-risk feed is connected.</p>
+          <p>{nav.upcoming ? `Limit ${nav.upcoming.kph} in ${formatDistance(nav.upcoming.metres)}` : "No speed change is reported on this route."}</p>
+          <p>{chip.label}. {chip.message}</p>
+          {similar ? <p>{similar}</p> : null}
+          {nav.selected?.memoryNote ? <p>{nav.selected.memoryNote}</p> : null}
+          {nav.routes.length === 1 ? <p className="opacity-70">One route. The provider did not send another.</p> : <ShortestOfThese nav={nav} />}
+          <p className="opacity-60">Fuel, if you want a figure. Leave it empty and no cost is shown.</p>
+          <div className="flex flex-wrap gap-2">
+            <input aria-label="Litres per 100 km" inputMode="decimal" value={fuelUse.litres} placeholder="L/100 km" className="w-28 bg-transparent" onChange={(event) => onFuel({ ...fuelUse, litres: event.target.value })} />
+            <input aria-label="Price per litre in cedis" inputMode="decimal" value={fuelUse.price} placeholder="GH₵ per litre" className="w-32 bg-transparent" onChange={(event) => onFuel({ ...fuelUse, price: event.target.value })} />
+          </div>
+          {litresBad ? <p>Enter consumption between 2 and 40 litres per 100 km.</p> : null}
+          {priceBad ? <p>Enter a price between 1 and 40 cedis per litre, or leave it empty.</p> : null}
+          {fuel ? <p>{fuel.litres} L{fuel.costGhs != null ? ` · GH₵ ${fuel.costGhs.toFixed(2)}` : ""}. {fuel.note}</p> : null}
+          {nav.selected && nav.destination ? (
+            <button
+              type="button"
+              className="text-left underline"
+              onClick={() => {
+                const extra = [nav.selected?.memoryNote, ...(nav.selected?.warnings ?? [])].filter(Boolean).join(" ");
+                const text = estimateShare({
+                  destination: nav.destination?.name ?? "Destination",
+                  duration: formatDuration(nav.selected!.durationS / 60),
+                  distance: formatDistance(nav.selected!.distanceM),
+                  at: new Date().toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit" }),
+                  traffic: nav.trafficNote,
+                  extra,
+                });
+                if (navigator.share) void navigator.share({ text }).catch(() => undefined);
+                else void navigator.clipboard?.writeText(text);
+              }}
+            >
+              Share estimate
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -852,6 +1131,7 @@ function SummaryCard({ nav }: { nav: ReturnType<typeof useDrive> }) {
         <p className="mt-3 text-xs text-muted">{trip.saved === "saving" ? "Saving…" : trip.saved === "saved" ? "Saved to your trip history." : trip.saved === "error" ? trip.saveError : "Not saved."}</p>
         <div className="mt-5 flex flex-wrap gap-2">
           <button type="button" className="drive-action" onClick={() => { nav.setSearchOpen(false); nav.closePreview(); }}>Done</button>
+          {trip.held ? <button type="button" className="drive-quiet" onClick={() => void nav.retrySave()}>Try again</button> : null}
           {trip.sessionId ? <button type="button" className="drive-quiet" onClick={nav.discardSummary}>Remove this trip</button> : null}
           <button type="button" className="drive-quiet" onClick={nav.playDemo}>Play the demo again</button>
         </div>

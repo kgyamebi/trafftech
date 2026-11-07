@@ -14,6 +14,7 @@ const PAGES: CommandHit[] = [
   { id: "work", label: "Work", detail: "Trips, papers, costs you enter", href: "/work" },
   { id: "emergency", label: "Emergency card", detail: "Name, vehicle, contact", href: "/emergency" },
   { id: "home", label: "Map", detail: "Where you are going", href: "/home" },
+  { id: "roads", label: "Local roads", detail: "Speeds and reports drivers shared", href: "/roads" },
   { id: "drive", label: "Drive", detail: "The same map", href: "/home" },
   { id: "vehicle", label: "Vehicle", detail: "Digital garage", href: "/vehicle" },
   { id: "traffic", label: "Traffic", detail: "Notices, payments, evidence", href: "/traffic" },

@@ -1,51 +1,23 @@
 import Link from "next/link";
 import { AUDIT_KEEP_DAYS, NOTE_KEEP_DAYS, SAMPLE_KEEP_DAYS } from "@/domain/retention";
+import { activePlanLine } from "@/domain/entitlements";
 import { driverHealth, fleetHealth, openingCard } from "@/domain/intelligence";
-import { accraParts, formatDay, formatWhen, ghs } from "@/domain/dates";
+import { accraParts, formatWhen, ghs } from "@/domain/dates";
 import { exchange } from "@/domain/languages";
 import { planById, pricingConfig } from "@/config/pricing";
 import { briefScript, plainAlert } from "@/domain/companion";
 import type { DrivePrefs } from "@/domain/drive-prefs";
 import type { Workspace } from "@/domain/types";
 import { deleteAccountAction, markNotificationAction, requestPlanAction } from "@/server/actions";
+import { DocumentsVault } from "./documents-vault";
 import { DrivePrefsForm, DriverForm, FleetCreateForm, PrefsForm } from "./forms";
+import { VoiceChoice } from "./voice-choice";
 import { Listen } from "./listen";
 import { SignOutButton } from "./shell";
-import { EmptyState, Source, Status } from "./ui";
+import { EmptyState, Source } from "./ui";
 
-export function DocumentsScreen({ ws }: { ws: Workspace }) {
-  if (!ws.documents.length) {
-    return <EmptyState title="The vault is empty." body="Insurance, roadworthiness, registration, ownership, your licence, a sale agreement. Add the date printed on the paper. Verification with government is not connected." action={<Link className="btn" href="/documents/new">Add a document</Link>} />;
-  }
-  return (
-    <div className="grid gap-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <p className="eyebrow">Vault</p>
-          <h1 className="display mt-3 text-5xl">Documents</h1>
-        </div>
-        <Link className="btn" href="/documents/new">Add</Link>
-      </header>
-      <ul className="grid gap-3">
-        {ws.documents.map((doc) => (
-          <li key={doc.id} className="card px-5 py-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-lg">{doc.label}</h2>
-                <p className="text-sm text-muted">{doc.expiresOn ? `Expires ${formatDay(doc.expiresOn)}` : "No expiry entered"} · Updated {formatDay(doc.updatedAt.slice(0, 10))}</p>
-              </div>
-              <Status tone={doc.status === "valid" ? "good" : doc.status === "expiring" ? "warn" : doc.status === "expired" || doc.status === "missing" ? "bad" : "info"}>
-                {doc.status === "unknown" ? "Date needed" : doc.status}
-              </Status>
-            </div>
-            <p className="mt-3 text-sm">{doc.verificationLabel}</p>
-            <div className="mt-2"><Source source={doc.source} /></div>
-            {doc.hasFile ? <a className="mt-3 inline-block text-sm underline" href={`/api/files/${doc.id}`}>Preview file</a> : null}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+export function DocumentsScreen({ ws, tight = [] }: { ws: Workspace; tight?: string[] }) {
+  return <DocumentsVault documents={ws.documents} canSave={ws.mode === "user"} tight={tight} />;
 }
 
 export function NotificationsScreen({ ws, topic }: { ws: Workspace; topic: string }) {
@@ -123,8 +95,8 @@ export function FleetScreen({ ws }: { ws: Workspace }) {
         </p>
         <p className="mt-2 max-w-lg text-sm text-muted">
           {fleet.sample
-            ? "These drivers are a sample. Their scores are not yours. A score appears only after enough saved driving, on the same formula as a personal score."
-            : "A score appears only after that driver has enough saved driving. The formula is the same as your own score. A blank score is not a zero."}
+            ? "These drivers are a sample. Their scores are not yours. A short record stays unscored. A blank score is not a zero."
+            : "A short record stays unscored. A blank score is not a zero."}
         </p>
       </header>
       <dl className="grid grid-cols-3 gap-4">
@@ -295,6 +267,10 @@ export function SettingsScreen({ ws, prefs }: { ws: Workspace; prefs: DrivePrefs
         <p className="mt-3 text-muted">{ws.viewer.email}</p>
       </header>
       <section className="grid gap-3">
+        <h2 className="text-2xl">Speaking voice</h2>
+        <VoiceChoice />
+      </section>
+      <section className="grid gap-3">
         <h2 className="text-2xl">Driving</h2>
         <DrivePrefsForm prefs={prefs} />
       </section>
@@ -304,6 +280,7 @@ export function SettingsScreen({ ws, prefs }: { ws: Workspace; prefs: DrivePrefs
           ["/protect", "Protection"],
           ["/work", "Work"],
           ["/emergency", "Emergency card"],
+          ["/roads", "Local roads"],
           ["/settings/notifications", "Notifications"],
           ["/settings/subscription", "Plan"],
           ["/settings/privacy", "Privacy centre"],
@@ -328,6 +305,7 @@ export function PlanScreen({ ws }: { ws: Workspace }) {
         <p className="eyebrow">Plans</p>
         <h1 className="display mt-3 text-5xl">Pay for depth, not for safety.</h1>
         <p className="mt-3 max-w-lg text-muted">Prices come from the operator config. Checkout is {pricingConfig.checkoutConnected ? "connected" : "not connected"}.</p>
+        <p className="mt-3 max-w-lg text-sm">{activePlanLine(ws.entitlements)}</p>
       </header>
       <div className="grid gap-4 lg:grid-cols-3">
         {pricingConfig.plans.map((plan) => (
@@ -363,6 +341,7 @@ export function PrivacyScreen() {
       <h1 className="display text-5xl">Privacy centre</h1>
       <p>Nokware stores the account, vehicles, document dates, files you upload, notices you paste, payments you record, and driving sessions you choose to save.</p>
       <p>A saved drive keeps speed samples, the limit you selected, and a shortened copy of the route so you can review the trip. It does not keep a continuous location trace. Demonstrations are not saved. You can delete one trip, or the whole account, from Settings.</p>
+      <p>Sharing on Local roads is off until you turn it on. Your name is left off a shared speed. You can stop sharing, or remove what you shared. Checkpoint locations are not collected.</p>
       <p>
         Speed samples stay for {SAMPLE_KEEP_DAYS} days, longer than the six-month score. After that the trip row stays and the raw speeds and route points are removed. Questions stay for {NOTE_KEEP_DAYS / 365} years. The change log stays for {AUDIT_KEEP_DAYS / 365} years. Notices stay for one year. Papers, payments, vehicles, and the account are not removed by this schedule.
       </p>

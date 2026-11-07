@@ -34,10 +34,12 @@ export async function fetchRoutes(
   from: GeoPoint,
   to: GeoPoint,
   mode: TravelMode,
+  via?: GeoPoint | null,
 ): Promise<{ ok: true; routes: RouteOption[] } | { ok: false; message: string }> {
   if (mapProviderId() === "off") return { ok: false, message: "Maps are not connected." };
   try {
     const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}`, mode });
+    if (via) params.set("via", `${via.lat},${via.lng}`);
     const response = await fetch(`/api/maps/route?${params}`, { signal: AbortSignal.timeout(12000) });
     const body = (await response.json().catch(() => null)) as { ok?: boolean; routes?: RouteOption[]; message?: string } | null;
     if (!body?.ok || !body.routes?.length) return { ok: false, message: body?.message ?? "We couldn't calculate a route." };
@@ -78,8 +80,8 @@ export function createOpenMapProvider(): MapProvider {
     async reverseGeocode(point) {
       return reverseLabel(point);
     },
-    async calculateRoute(from, to, mode) {
-      const result = await fetchRoutes(from, to, mode);
+    async calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode, via?: GeoPoint | null) {
+      const result = await fetchRoutes(from, to, mode, via);
       if (!result.ok) throw new Error(result.message);
       return result.routes;
     },
@@ -114,8 +116,8 @@ export class OpenNavigationProvider implements NavigationProvider {
   readonly sourceLabel = "OpenStreetMap";
   readonly lanes = false;
   readonly predictiveTrafficReroute = false;
-  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode) {
-    return fetchRoutes(from, to, mode);
+  calculateRoute(from: GeoPoint, to: GeoPoint, mode: TravelMode, via?: GeoPoint | null) {
+    return fetchRoutes(from, to, mode, via);
   }
 }
 

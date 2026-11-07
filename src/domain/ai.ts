@@ -1,6 +1,8 @@
+import { clarify, documentAnswer, lawAnswer, present, socialAnswer } from "./conversation";
 import { DriverIntelligenceEngine } from "./intelligence";
 import { isEvasionRequest } from "./inbox";
 import { explainScoreChange } from "./insights";
+import { readTurn } from "./hearing";
 import { formatDay, ghs } from "./dates";
 import type { AIAnswer, AISection, DocumentView, ViolationView, Workspace } from "./types";
 
@@ -11,7 +13,7 @@ export interface AIContext {
   plan: string;
   score: Record<string, unknown>;
   vehicle: Record<string, unknown> | null;
-  documents: { label: string; status: string; expiresOn: string | null; source: string }[];
+  documents: { label: string; status: string; expiresOn: string | null; daysRemaining: number | null; note: string; source: string; read: string }[];
   violations: {
     id: string;
     title: string;
@@ -51,7 +53,10 @@ export function buildAIContext(ws: Workspace, purpose: string): AIContext {
       label: d.label,
       status: d.status,
       expiresOn: d.expiresOn,
+      daysRemaining: d.daysRemaining,
+      note: d.note,
       source: d.source,
+      read: (d.reading?.fields ?? []).map((field) => `${field.label} ${field.value}`).join(". "),
     })),
     violations: ws.violations.map((v) => ({
       id: v.id,
@@ -254,10 +259,35 @@ export function answerVehicleQuestion(ws: Workspace, question: string): AIAnswer
   ]);
 }
 
-export function answerQuestion(ws: Workspace, question: string): AIAnswer {
-  if (isEvasionRequest(question)) return refuseEvasion();
-  const q = question.toLowerCase();
-  if (/why.*(score|fall|drop|down)|explain my score|score change/.test(q)) {
+function tripAnswer(ws: Workspace): AIAnswer {
+  const last = [...ws.sessions].reverse().find((session) => session.samples > 0) ?? null;
+  if (!last) {
+    return local("This trip", [
+      section("FACT", "No saved trip", "There is no recorded drive to explain. A demonstration is not saved."),
+    ]);
+  }
+  const assessed = DriverIntelligenceEngine.fromWorkspace(ws).assessTrip(
+    {
+      demo: ws.mode === "demo",
+      minutes: last.minutes,
+      samples: last.samples,
+      compliance: last.speedCompliance,
+      harshBrakes: last.harshBrakes,
+      harshAccels: last.harshAccelerations,
+      events: last.notes,
+    },
+    "Traffic is not available from the connected map provider.",
+  );
+  return local("This trip", [
+    section("FACT", "Calculated", `${last.originLabel ?? last.roadContext} to ${last.destinationLabel ?? "the recorded drive"}. Speed compliance ${assessed.compliance == null ? "was not scored" : `${assessed.compliance}%`}.`),
+    section("FACT", "Quality", assessed.quality == null ? assessed.qualityNote : `${assessed.quality}. ${assessed.qualityNote}`),
+    section("FACT", "Score", assessed.scoreImpact),
+    section("RECOMMENDATION", "Next", assessed.improvements[0] ?? "Nothing in this trip asks for a change."),
+  ]);
+}
+
+function factsFor(ws: Workspace, intent: string, question: string): AIAnswer {
+  if (intent === "score") {
     const text = explainScoreChange(ws.scores.month, ws.scores["6months"].status === "ready" ? ws.scores["6months"] : null);
     return local("Your score", [
       section("FACT", "Calculated", text),
@@ -265,10 +295,8 @@ export function answerQuestion(ws: Workspace, question: string): AIAnswer {
       section("RECOMMENDATION", "Next", "Open Driver Score and compare this month with the longer window."),
     ]);
   }
-  if (/violation|fine|ticket|notice/.test(q)) {
-    return explainViolation(ws.violations[0]);
-  }
-  if (/am i ready|ready to drive/.test(q)) {
+  if (intent === "violation") return explainViolation(ws.violations[0]);
+  if (intent === "ready") {
     const report = DriverIntelligenceEngine.fromWorkspace(ws).readiness();
     return local("Before you drive", [
       section("FACT", report.state, report.title),
@@ -280,69 +308,35 @@ export function answerQuestion(ws: Workspace, question: string): AIAnswer {
       ),
     ]);
   }
-  if (/explain (this |my )?trip/.test(q)) {
-    const last = [...ws.sessions].reverse().find((session) => session.samples > 0) ?? null;
-    if (!last) {
-      return local("This trip", [
-        section("FACT", "No saved trip", "There is no recorded drive to explain. A demonstration is not saved."),
-      ]);
-    }
-    const assessed = DriverIntelligenceEngine.fromWorkspace(ws).assessTrip(
-      {
-        demo: ws.mode === "demo",
-        minutes: last.minutes,
-        samples: last.samples,
-        compliance: last.speedCompliance,
-        harshBrakes: last.harshBrakes,
-        harshAccels: last.harshAccelerations,
-        events: last.notes,
-      },
-      "Traffic is not available from the connected map provider.",
-    );
-    return local("This trip", [
-      section("FACT", "Calculated", `${last.originLabel ?? last.roadContext} to ${last.destinationLabel ?? "the recorded drive"}. Speed compliance ${assessed.compliance == null ? "was not scored" : `${assessed.compliance}%`}.`),
-      section("FACT", "Quality", assessed.quality == null ? assessed.qualityNote : `${assessed.quality}. ${assessed.qualityNote}`),
-      section("FACT", "Score", assessed.scoreImpact),
-      section("RECOMMENDATION", "Next", assessed.improvements[0] ?? "Nothing in this trip asks for a change."),
-    ]);
-  }
-  if (/renew|expir/.test(q)) {
-    const upcoming = ws.documents
-      .filter((doc) => doc.daysRemaining != null)
-      .sort((a, b) => (a.daysRemaining ?? 0) - (b.daysRemaining ?? 0))
-      .slice(0, 4);
-    if (!upcoming.length) {
-      return local("Renewals", [section("FACT", "No dates", "No expiry date is saved on this account yet.")]);
-    }
-    return local("What needs renewal", [
-      section(
-        "FACT",
-        "Saved dates",
-        upcoming.map((doc) => `${doc.label}: ${doc.daysRemaining} days. ${doc.verificationLabel}.`).join(" "),
-      ),
-      section("RECOMMENDATION", "Next", upcoming[0].daysRemaining != null && upcoming[0].daysRemaining < 0 ? "Renew the expired document, then update the date you saved." : "Plan the nearest date. Nokware does not file the renewal."),
-    ]);
-  }
-  if (/summar|this month|driving/.test(q)) return summarizeDriving(ws);
-  if (/next|what should i do/.test(q)) {
+  if (intent === "trip") return tripAnswer(ws);
+  if (intent === "documents") return documentAnswer(ws);
+  if (intent === "summary") return summarizeDriving(ws);
+  if (intent === "law") return lawAnswer();
+  if (intent === "next") {
     const primary = ws.primaryAttention;
     return local("What is next", [
-      section(
-        "FACT",
-        "Highest item",
-        primary ? `${primary.title}. ${primary.detail}` : ws.hero.title,
-      ),
+      section("FACT", "Highest item", primary ? `${primary.title}. ${primary.detail}` : ws.hero.title),
       section("RECOMMENDATION", "Do this", primary?.recommendedAction ?? "Add your vehicle, then record a real drive when you are ready."),
     ]);
   }
   return answerVehicleQuestion(ws, question);
 }
 
-export function localDriverAnswer(ws: Workspace, question: string, purpose = "ask"): AIAnswer {
+export function answerQuestion(ws: Workspace, question: string, history: string[] = []): AIAnswer {
+  const labels = ws.documents.map((doc) => doc.label);
+  const reading = readTurn(question, history, labels);
+  if (reading.intent === "evasion" || isEvasionRequest(question)) return refuseEvasion();
+  if (reading.intent === "unclear" || reading.confidence === "unclear") return clarify(reading);
+  const social = socialAnswer(reading);
+  if (social) return present(social, reading, false);
+  return present(factsFor(ws, reading.intent, reading.text), reading, true);
+}
+
+export function localDriverAnswer(ws: Workspace, question: string, purpose = "ask", history: string[] = []): AIAnswer {
   if (purpose === "violation") return explainViolation(ws.violations.find((v) => question.includes(v.id)) ?? ws.violations[0]);
   if (purpose === "contest") return analyzeContest(ws.violations[0], question);
   if (purpose === "summary") return summarizeDriving(ws);
-  return answerQuestion(ws, question);
+  return answerQuestion(ws, question, history);
 }
 
 export function assertNoOfficialSource(documents: DocumentView[]): boolean {

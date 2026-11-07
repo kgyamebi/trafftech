@@ -250,6 +250,16 @@ export function buildDemoDatabase(now: Date): {
     audit: [],
     places: [],
     expenses: [],
+    fieldConsents: [],
+    roadCells: [],
+    fieldReports: [],
+    communityPlaces: [],
+    reporterStanding: [],
+    fieldEvents: [],
+    fieldFolds: [],
+    lessons: [],
+    asks: [],
+    livingDay: "",
   };
 
   return { user, db, fleetSessions: fleetSessions(now) };

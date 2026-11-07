@@ -53,7 +53,12 @@ function writeDatabase(dir: string, db: Database) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(db));
   if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch {
+    fs.copyFileSync(tmp, file);
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 export async function updateDatabase<T>(dir: string, fn: (db: Database) => T): Promise<T> {

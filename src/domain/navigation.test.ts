@@ -6,18 +6,30 @@ import {
   closingLine,
   countHarsh,
   decimate,
+  coordinatePlace,
   destinationAllowed,
+  parseCoordinateQuery,
   filterTrips,
+  haversine,
   locationMessage,
   lookAhead,
+  guidanceFace,
   maneuverText,
+  splitRoute,
   mapFailureMessage,
   movementStatus,
+  followingInstruction,
   nextInstruction,
+  routeDelta,
+  turnList,
   parseNominatim,
   parseOsrm,
   progressAlong,
+  clusterOpenZoom,
+  clusterPins,
   rankRoutes,
+  shapeMeasure,
+  shortestRouteId,
   readReverse,
   rerouteDecision,
   steadyPosition,
@@ -25,6 +37,7 @@ import {
   shouldSpeak,
   speedLimitProvider,
   summariseScript,
+  similarDriveNote,
   tripComparison,
   type NavAlert,
 } from "./navigation";
@@ -148,6 +161,11 @@ describe("navigation", () => {
     ];
     expect(nextInstruction(100, steps)?.text).toBe("Turn right");
     expect(nextInstruction(100, steps)?.metres).toBe(300);
+    expect(followingInstruction(100, steps)?.text).toBe("Arrive");
+    expect(followingInstruction(100, steps)?.metres).toBe(1100);
+    expect(turnList(steps)).toEqual([{ text: "Turn right", metres: 400 }, { text: "Arrive", metres: 800 }]);
+    expect(routeDelta({ durationS: 900, distanceM: 5000 }, { durationS: 600, distanceM: 9000 })).toBe("5 min longer · 4.0 km shorter");
+    expect(routeDelta({ durationS: 600, distanceM: 9000 }, { durationS: 600, distanceM: 9000 })).toBe("Same estimated time · about the same distance");
     const critical: NavAlert = { id: "b", level: "critical", title: "Route blocked", detail: "The road ahead is closed.", source: "route" };
     const info: NavAlert = { id: "i", level: "information", title: "Note", detail: "Later.", source: "route" };
     expect(chooseAlert([info, critical])?.id).toBe("b");
@@ -161,6 +179,16 @@ describe("navigation", () => {
     expect(decimate(line, 2)).toHaveLength(2);
     expect(tripComparison(90, null)).toBeNull();
     expect(tripComparison(96, 88)).toMatch(/higher/);
+    const alike = [
+      { distanceM: 10_000, minutes: 18, source: "USER_PROVIDED" },
+      { distanceM: 11_000, minutes: 22, source: "USER_PROVIDED" },
+      { distanceM: 9_500, minutes: 20, source: "USER_PROVIDED" },
+      { distanceM: 40_000, minutes: 50, source: "USER_PROVIDED" },
+    ];
+    expect(similarDriveNote(alike.slice(0, 2), 10_000)).toBeNull();
+    expect(similarDriveNote(alike, 10_000)).toMatch(/about 20 min/);
+    expect(similarDriveNote(alike, 10_000)).toMatch(/does not change the estimate/);
+    expect(similarDriveNote(alike.map((trip) => ({ ...trip, source: "DEMO" })), 10_000)).toMatch(/not your driving/);
     const now = new Date("2026-11-06T12:00:00.000Z");
     const trips = [
       { endedAt: "2026-11-06T08:00:00.000Z" },
@@ -228,6 +256,22 @@ describe("navigation", () => {
     expect(parsed.routes[0].trafficNote.toLowerCase()).not.toContain("live");
     expect(parsed.routes[0].steps[0].text).toBe("Exit right");
     expect(parsed.routes[1].steps[1].text).toBe("Turn right onto Boundary Rd");
+    const withLane = parseOsrm({
+      code: "Ok",
+      routes: [{
+        distance: 100,
+        duration: 30,
+        geometry: { coordinates: [[-0.2, 5.6], [-0.19, 5.6]] },
+        legs: [{ steps: [{
+          distance: 100,
+          name: "Ring Rd",
+          maneuver: { type: "turn", modifier: "left", location: [-0.2, 5.6] },
+          intersections: [{ lanes: [{ indications: ["left"], valid: false }, { indications: ["straight"], valid: true }] }],
+        }] }],
+      }],
+    });
+    expect(withLane.ok).toBe(true);
+    if (withLane.ok) expect(withLane.routes[0].steps[0].text).toBe("Turn left onto Ring Rd. Use the lane marked straight.");
     expect(parseOsrm({ code: "NoRoute" }).ok).toBe(false);
     const places = parseNominatim([
       { place_id: 9, name: "Kotoka International Airport", display_name: "Kotoka International Airport, Accra, Ghana", lat: "5.605", lon: "-0.166" },
@@ -236,6 +280,21 @@ describe("navigation", () => {
     expect(places).toHaveLength(1);
     expect(places[0].name).toBe("Kotoka International Airport");
     expect(maneuverText("arrive", undefined, "")).toBe("Arrive");
+    expect(maneuverText("arrive", undefined, "Makola")).toBe("Arrive at Makola");
+    expect(maneuverText("roundabout", "right", "Ring Rd", 2)).toBe("Take the 2nd exit onto Ring Rd");
+    expect(maneuverText("roundabout", undefined, "", 11)).toBe("Take the 11th exit");
+    expect(maneuverText("roundabout", undefined, "", 0)).toBe("Take the roundabout");
+    const face = guidanceFace("Turn left onto Ring Rd. Use the lane marked straight.");
+    expect(face).toEqual({ action: "Turn left", road: "Ring Rd", lane: "Use the lane marked straight" });
+    expect(guidanceFace("Take the 2nd exit onto Liberation Rd")).toEqual({ action: "Take the 2nd exit", road: "Liberation Rd", lane: "" });
+    expect(guidanceFace("Arrive at Makola").action).toBe("Arrive");
+    const line = [{ lat: 5.6, lng: -0.2 }, { lat: 5.6, lng: -0.19 }];
+    const whole = haversine(line[0], line[1]);
+    const split = splitRoute(line, whole / 2);
+    expect(split.done[0]).toEqual(line[0]);
+    expect(split.left[split.left.length - 1]).toEqual(line[1]);
+    expect(split.left[0].lng).toBeGreaterThan(-0.2);
+    expect(split.left[0].lng).toBeLessThan(-0.19);
   });
 
   it("names a tapped place only when OpenStreetMap's object is actually there", () => {
@@ -297,5 +356,36 @@ describe("navigation", () => {
     expect(onARoad.maxspeed).toBeNull();
     expect(onARoad.address).toMatch(/Airport Residential Area/);
     expect(readReverse(null, here).name).toBe("Dropped pin");
+  });
+});
+
+describe("shapes, clusters, and the shortest returned route", () => {
+  it("measures a shape, groups far pins, and keeps the fastest route first", () => {
+    const square = [
+      { lat: 5.6, lng: -0.2 },
+      { lat: 5.601, lng: -0.2 },
+      { lat: 5.601, lng: -0.199 },
+      { lat: 5.6, lng: -0.199 },
+    ];
+    const shape = shapeMeasure(square);
+    expect(shape?.areaM2).toBeGreaterThan(1000);
+    const open = shapeMeasure(square, false);
+    expect(open?.areaM2).toBeNull();
+    expect(open && shape ? open.perimeterM : 0).toBeLessThan(shape?.perimeterM ?? 0);
+    expect(shapeMeasure([square[0], square[1]])).toEqual({ perimeterM: expect.any(Number), areaM2: null });
+    expect(clusterOpenZoom(10)).toBe(14);
+    expect(clusterOpenZoom(19)).toBe(19);
+    const pins = [
+      { id: "a", name: "A", lat: 5.6, lng: -0.2 },
+      { id: "b", name: "B", lat: 5.6001, lng: -0.2 },
+    ];
+    expect(clusterPins(pins, 16)).toHaveLength(2);
+    expect(clusterPins(pins, 10)).toHaveLength(1);
+    const routes = [
+      { id: "fast", durationS: 600, distanceM: 9000 },
+      { id: "short", durationS: 900, distanceM: 5000 },
+    ];
+    expect(rankRoutes(routes).map((route) => route.id)).toEqual(["fast", "short"]);
+    expect(shortestRouteId(routes)).toBe("short");
   });
 });

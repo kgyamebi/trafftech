@@ -1,15 +1,18 @@
 "use client";
 
 import type { GeoPoint } from "@/domain/navigation";
+import { resolveVehicle, vehicleShapes, type VehicleMark } from "@/domain/vehicle-look";
 
 export function SchematicMap({
   lines,
   puck,
   night,
+  mark,
 }: {
   lines: { id: string; points: GeoPoint[]; active: boolean; faded?: boolean }[];
   puck: { lat: number; lng: number; bearing: number; demo: boolean } | null;
   night: boolean;
+  mark?: VehicleMark;
 }) {
   const points = lines.flatMap((line) => line.points);
   if (puck) points.push(puck);
@@ -54,10 +57,7 @@ export function SchematicMap({
         />
       ))}
       {puck ? (
-        <g transform={`translate(${xy(puck).split(",")[0]} ${xy(puck).split(",")[1]}) rotate(${puck.bearing})`}>
-          <circle r="2.2" fill={puck.demo ? "#c4a574" : "#f4f1ea"} stroke="#8a6234" strokeWidth="0.6" />
-          <polygon points="0,-3.2 1.5,2 -1.5,2" fill={night ? "#f4f1ea" : "#161712"} />
-        </g>
+        <g transform={`translate(${xy(puck).split(",")[0]} ${xy(puck).split(",")[1]}) rotate(${puck.bearing}) scale(0.07)`} dangerouslySetInnerHTML={{ __html: vehicleShapes(mark ?? resolveVehicle({ mode: "driving", role: "private", stored: null }), puck.demo) }} />
       ) : null}
     </svg>
   );

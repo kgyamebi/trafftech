@@ -164,16 +164,16 @@ export const guides: Record<string, Guide> = {
     ],
   },
   score: {
-    title: "How the Nokware driver score is calculated",
+    title: "The Nokware driver score",
     description: "A personal driving score from saved trips. It is not a government grade and not an insurance quote.",
     kicker: "Score",
     sources: [{ label: "Nokware", href: "/" }],
     sections: [
       {
-        heading: "Only from recorded driving",
+        heading: "From saved driving",
         paragraphs: [
           disclaimer,
-          "The score appears after at least 30 minutes and 20 speed samples, using a limit you selected. The weights are speed compliance 30%, braking 20%, acceleration 20%, traffic compliance 15%, and consistency 15%.",
+          "The score is calculated from saved driving. A short record stays unscored. The number is not a government grade and not an insurance quote.",
           "Cornering, road-risk exposure and a yearly window are not recorded, so they are not part of the number. A demonstration account is labelled demo and does not change a personal score.",
         ],
       },

@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mapProviderId } from "@/config/maps";
-import { destinationAllowed, parseNominatim } from "@/domain/navigation";
+import { coordinatePlace, destinationAllowed, inGhana, parseCoordinateQuery, parseNominatim } from "@/domain/navigation";
 import { rateLimit } from "@/server/rate-limit";
+import { getSession } from "@/server/session";
 
 export async function GET(req: NextRequest) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ ok: false, message: "Sign in to use the map." }, { status: 401 });
   if (mapProviderId() === "off") {
     return NextResponse.json({ ok: false, code: "off", message: "Maps are not connected." }, { status: 503 });
   }
@@ -16,6 +19,13 @@ export async function GET(req: NextRequest) {
   const ip = (req.headers.get("x-forwarded-for") ?? "local").split(",")[0].trim();
   if (!rateLimit(`maps-search:${ip}`, 1, 1100)) {
     return NextResponse.json({ ok: false, code: "rate", message: "Search is a little busy. Try again in a second." }, { status: 429 });
+  }
+  const typed = parseCoordinateQuery(query);
+  if (typed) {
+    if (!inGhana(typed)) {
+      return NextResponse.json({ ok: false, code: "query", message: "Routing is set up for places in Ghana." }, { status: 400 });
+    }
+    return NextResponse.json({ ok: true, places: [coordinatePlace(typed)], source: "user" });
   }
   try {
     const url = new URL("https://nominatim.openstreetmap.org/search");

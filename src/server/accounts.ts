@@ -2,10 +2,13 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import { accraToday, addDays, isCalendarDate } from "@/domain/dates";
-import { inGhana } from "@/domain/navigation";
+import { countHarsh, inGhana } from "@/domain/navigation";
 import { canAddVehicle } from "@/domain/entitlements";
 import { parseTrafficMessage } from "@/domain/inbox";
-import { ALLOWED_MIME, MAX_UPLOAD_BYTES, cleanText, emailSchema, nameSchema, passwordSchema, plateSchema, safeFileName } from "@/domain/clean";
+import { allowedUpload, MAX_UPLOAD_BYTES, cleanText, emailSchema, nameSchema, passwordSchema, plateSchema, safeFileName } from "@/domain/clean";
+import { acceptReading, kindOnReading, sealReading } from "@/domain/extract";
+import { applyPracticeReading, rememberDateCorrection, tightIds } from "@/domain/living";
+import { absorbDrive, fieldFromDatabase } from "@/domain/field";
 import { defaultPrefs, type DrivingSessionRecord, type EmergencyDetails, type ExpenseKind, type PlanId, type SavedPlaceRecord, type UserRecord } from "@/domain/types";
 import { hashPassword, verifyPassword } from "./crypto";
 import { dataDir, readDatabase, updateDatabase } from "./store";
@@ -148,14 +151,24 @@ export async function addDocument(
     label: string;
     expiresOn: string;
     note: string;
+    reading?: string | null;
   },
 ) {
   const label = cleanText(input.label, 80);
   if (!label) throw new AccountError("Name the document.");
-  const expiresOn = input.expiresOn ? input.expiresOn.slice(0, 10) : null;
-  if (expiresOn && !isCalendarDate(expiresOn)) throw new AccountError("Use a real expiry date.");
+  const typedExpiry = input.expiresOn ? input.expiresOn.slice(0, 10) : null;
+  if (typedExpiry && !isCalendarDate(typedExpiry)) throw new AccountError("Use a real expiry date.");
+  const parsed = acceptReading(input.reading ?? null);
+  const sealed = parsed ? sealReading(parsed, { expiresOn: typedExpiry }) : null;
+  const fileKind = sealed ? kindOnReading(sealed) : null;
+  const fileExpiry = sealed?.fields.find((field) => field.label === "Expiry")?.value ?? "";
   return updateDatabase(dir, (db) => {
     requireUser(db, userId);
+    if (sealed && sealed.reasons.some((reason) => /date entered/.test(reason))) {
+      rememberDateCorrection(db, userId, fileKind ?? input.kind, new Date());
+    }
+    const reading = sealed ? applyPracticeReading(sealed, fileKind ?? input.kind, tightIds(db.lessons ?? [])) : null;
+    const expiresOn = isCalendarDate(fileExpiry) ? fileExpiry : reading?.decision === "refused" ? null : typedExpiry;
     if (input.vehicleId && !db.vehicles.some((v) => v.id === input.vehicleId && v.userId === userId)) {
       throw new AccountError("That vehicle is not on this account.");
     }
@@ -163,15 +176,16 @@ export async function addDocument(
       id: id(),
       userId,
       vehicleId: input.vehicleId,
-      kind: input.kind,
+      kind: fileKind ?? input.kind,
       label,
       expiresOn,
       updatedAt: new Date().toISOString(),
-      verification: "user_provided" as const,
+      verification: reading ? (reading.decision === "accepted" ? "accepted" as const : "refused" as const) : "user_provided" as const,
       fileName: null,
       storedName: null,
       mime: null,
       note: cleanText(input.note, 400),
+      reading,
       source: "USER_PROVIDED" as const,
       dataClass: "REAL" as const,
     };
@@ -187,7 +201,7 @@ export async function attachFile(
   documentId: string,
   file: { name: string; type: string; bytes: Buffer },
 ) {
-  if (!ALLOWED_MIME.has(file.type)) throw new AccountError("Use a PDF, JPEG, PNG, WebP or MP4.");
+  if (!allowedUpload(file.name, file.type)) throw new AccountError("Use a photo, PDF, Word or Excel file, a spreadsheet, a text file, or a short audio or video clip.");
   if (file.bytes.length > MAX_UPLOAD_BYTES) throw new AccountError("Files need to be under 8 MB.");
   const db = readDatabase(dir);
   const doc = db.documents.find((d) => d.id === documentId && d.userId === userId);
@@ -282,34 +296,67 @@ export async function recordPayment(
   });
 }
 
-export async function saveDrivingSession(dir: string, userId: string, session: Omit<DrivingSessionRecord, "id" | "userId" | "source" | "dataClass" | "simulated">) {
-  if (session.samples.length > 2000) throw new AccountError("That session is too long to store.");
-  if (session.samples.some((s) => s.speedKph < 0 || s.speedKph > 220 || s.limitKph < 5 || s.limitKph > 140)) {
-    throw new AccountError("A speed in that session is outside a plausible range.");
-  }
+function assertRecordedTrip(session: { samples: { t: string; speedKph: number; limitKph: number }[]; startedAt: string; endedAt: string; distanceM?: number }) {
+  const start = Date.parse(session.startedAt);
+  const end = Date.parse(session.endedAt);
+  const minutes = (end - start) / 60_000;
+  const speeds = session.samples.map((sample) => sample.speedKph);
+  const limits = session.samples.map((sample) => sample.limitKph);
+  const times = session.samples.map((sample) => Date.parse(sample.t));
+  const distance = session.distanceM;
+  const implied = distance != null && Number.isFinite(distance) && minutes >= 1 ? (distance / 1000) / (minutes / 60) : 0;
+  const broken = !Number.isFinite(start) || !Number.isFinite(end) || end < start || minutes > 18 * 60
+    || session.samples.length > 2000
+    || speeds.some((speed) => speed < 0 || speed > 220)
+    || limits.some((limit) => limit < 5 || limit > 140)
+    || times.some((at) => !Number.isFinite(at) || at < start - 60_000 || at > end + 60_000)
+    || implied > 220;
+  if (broken) throw new AccountError("That trip could not be saved.");
+}
+
+export async function saveDrivingSession(dir: string, userId: string, session: Omit<DrivingSessionRecord, "id" | "userId" | "source" | "dataClass" | "simulated"> & { raining?: boolean }) {
+  assertRecordedTrip(session);
+  const counted = countHarsh(session.samples);
+  const { raining = false, ...drive } = session;
   return updateDatabase(dir, (db) => {
     requireUser(db, userId);
-    const geometry = (session.geometry ?? [])
+    const geometry = (drive.geometry ?? [])
       .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
       .slice(0, 40);
     const row: DrivingSessionRecord = {
-      ...session,
+      ...drive,
       id: id(),
       userId,
       driverId: null,
       simulated: false,
       source: "USER_PROVIDED",
       dataClass: "REAL",
-      samples: session.samples.slice(0, 2000),
-      harshBrakes: Math.max(0, Math.round(session.harshBrakes)),
-      harshAccelerations: Math.max(0, Math.round(session.harshAccelerations)),
-      originLabel: session.originLabel?.trim().slice(0, 80) || undefined,
-      destinationLabel: session.destinationLabel?.trim().slice(0, 80) || undefined,
-      distanceM: session.distanceM != null && Number.isFinite(session.distanceM) ? Math.max(0, Math.round(session.distanceM)) : undefined,
+      samples: drive.samples.slice(0, 2000),
+      harshBrakes: counted.brakes,
+      harshAccelerations: counted.accels,
+      originLabel: drive.originLabel?.trim().slice(0, 80) || undefined,
+      destinationLabel: drive.destinationLabel?.trim().slice(0, 80) || undefined,
+      distanceM: drive.distanceM != null && Number.isFinite(drive.distanceM) ? Math.max(0, Math.round(drive.distanceM)) : undefined,
       geometry: geometry.length >= 2 ? geometry : undefined,
-      notes: (session.notes ?? []).map((note) => note.trim().slice(0, 140)).filter(Boolean).slice(0, 8),
+      notes: (drive.notes ?? []).map((note) => note.trim().slice(0, 140)).filter(Boolean).slice(0, 8),
+      clientId: drive.clientId?.trim().slice(0, 80) || undefined,
     };
+    if (row.clientId) {
+      const already = db.sessions.find((session) => session.userId === userId && session.clientId === row.clientId);
+      if (already) return already;
+    }
     db.sessions.push(row);
+    const moving = row.samples.map((sample) => sample.speedKph).filter((speed) => speed >= 5);
+    absorbDrive(fieldFromDatabase(db), {
+      sessionId: row.id,
+      userId,
+      at: row.endedAt,
+      meanSpeedKph: moving.length ? moving.reduce((sum, speed) => sum + speed, 0) / moving.length : null,
+      points: row.geometry ?? [],
+      raining,
+      simulated: false,
+      demo: false,
+    });
     db.audit.push({ id: id(), at: new Date().toISOString(), actorId: userId, action: "session_saved", entity: "session", entityId: row.id });
     return row;
   });

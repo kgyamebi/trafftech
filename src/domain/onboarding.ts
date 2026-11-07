@@ -6,6 +6,7 @@ export const ONBOARDING_STEPS = [
   { id: "traffic", title: "Never miss a traffic event", kicker: "Traffic" },
   { id: "score", title: "Understand your driving", kicker: "Score" },
   { id: "ai", title: "Your copilot", kicker: "Intelligence" },
+  { id: "voice", title: "Choose a voice", kicker: "Speaking" },
   { id: "ready", title: "You're ready", kicker: "Begin" },
 ] as const;
 

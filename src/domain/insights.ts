@@ -27,7 +27,7 @@ export function buildInsights(input: {
     insights.push({
       id: "weakest",
       source,
-      text: `The lowest part of this score is ${weakest[0]} at ${weakest[1]}.`,
+      text: `The lowest part of the month is ${weakest[0]} at ${weakest[1]}.`,
     });
   }
 
@@ -82,7 +82,7 @@ export function buildAchievements(input: {
     {
       id: "steady",
       title: "Steady month",
-      detail: "A month score of 90 or higher, from enough recorded driving.",
+      detail: "A strong month, from saved driving.",
       earned: input.month.status === "ready" && (input.month.overall ?? 0) >= 90,
     },
     {

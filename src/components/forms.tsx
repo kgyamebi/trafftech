@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { kindLabel, readingSummary } from "@/domain/extract";
 import { LANGUAGES } from "@/domain/drive-prefs";
 import { parseTrafficMessage } from "@/domain/inbox";
 import {
@@ -21,6 +22,7 @@ import {
   signupAction,
 } from "@/server/actions";
 import type { AIAnswer, NotificationPrefs, TransferRecord, Workspace } from "@/domain/types";
+import { ResourceReader } from "./resource-reader";
 import { ErrorNote } from "./ui";
 
 export function SignupForm() {
@@ -79,11 +81,38 @@ export function VehicleForm({ locked }: { locked?: string }) {
   );
 }
 
-export function DocumentForm({ ws }: { ws: Workspace }) {
+const DOC_KINDS = ["insurance", "roadworthiness", "registration", "ownership", "licence", "sale_agreement", "other"] as const;
+
+export function DocumentForm({
+  ws,
+  initial,
+  tight = [],
+}: {
+  ws: Workspace;
+  initial?: { kind?: string; label?: string; expiresOn?: string; note?: string; reading?: string };
+  tight?: string[];
+}) {
   const [state, action, pending] = useActionState(saveDocumentAction, { error: "" });
+  const [kind, setKind] = useState<(typeof DOC_KINDS)[number]>(DOC_KINDS.includes(initial?.kind as (typeof DOC_KINDS)[number]) ? (initial?.kind as (typeof DOC_KINDS)[number]) : "insurance");
+  const [label, setLabel] = useState(initial?.label ?? "");
+  const [expiresOn, setExpiresOn] = useState(/^\d{4}-\d{2}-\d{2}$/.test(initial?.expiresOn ?? "") ? initial?.expiresOn ?? "" : "");
+  const [note, setNote] = useState(initial?.note ?? "");
+  const [reading, setReading] = useState(initial?.reading ?? "");
   return (
     <form action={action} className="grid gap-4" encType="multipart/form-data">
       {state.error ? <ErrorNote title="Could not save" body={state.error} /> : null}
+      <ResourceReader
+        canSave
+        inputName="file"
+        tight={tight}
+        onUse={(result, stored) => {
+          if (result.suggestedKind && DOC_KINDS.includes(result.suggestedKind)) setKind(result.suggestedKind);
+          setLabel((current) => current || kindLabel(result.suggestedKind));
+          if (result.suggestedExpiry) setExpiresOn(result.suggestedExpiry);
+          setNote((current) => current || readingSummary(result));
+          setReading(stored);
+        }}
+      />
       <label className="label">
         Vehicle
         <select name="vehicleId" className="field" defaultValue={ws.activeVehicle?.id ?? ""}>
@@ -97,25 +126,21 @@ export function DocumentForm({ ws }: { ws: Workspace }) {
       </label>
       <label className="label">
         Kind
-        <select name="kind" className="field" defaultValue="insurance">
-          {["insurance", "roadworthiness", "registration", "ownership", "licence", "sale_agreement", "other"].map((k) => (
+        <select name="kind" className="field" value={kind} onChange={(event) => setKind(event.target.value as (typeof DOC_KINDS)[number])}>
+          {DOC_KINDS.map((k) => (
             <option key={k} value={k}>
               {k.replaceAll("_", " ")}
             </option>
           ))}
         </select>
       </label>
-      <Field name="label" label="Name" placeholder="Comprehensive insurance" />
-      <Field name="expiresOn" label="Expiry" type="date" />
+      <Field name="label" label="Name" placeholder="Comprehensive insurance" value={label} onChange={(event) => setLabel(event.target.value)} />
+      <Field name="expiresOn" label="Expiry" type="date" value={expiresOn} onChange={(event) => setExpiresOn(event.target.value)} />
       <label className="label">
         Note
-        <textarea name="note" className="field" placeholder="Anything you want beside the file" />
+        <textarea name="note" className="field" value={note} onChange={(event) => setNote(event.target.value)} placeholder="A note Driver Intelligence can read later. You can also let a file reading fill this." />
       </label>
-      <label className="label">
-        File
-        <input name="file" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4" className="text-sm" />
-      </label>
-      <p className="text-xs text-muted">Text recognition is not connected. Enter the expiry yourself. Files stay on this Nokware server, not with a ministry.</p>
+      <input type="hidden" name="reading" value={reading} />
       <button className="btn" disabled={pending} type="submit">
         {pending ? "Saving" : "Save document"}
       </button>
